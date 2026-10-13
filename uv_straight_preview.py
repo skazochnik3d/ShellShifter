@@ -232,7 +232,7 @@ def category_icon(key):
     """Small vector-drawn icons, independent of Maya icon search paths."""
     if key in ('packing', 'updates'):
         from uv_straight_icons import icon
-        return icon('pack' if key == 'packing' else 'wrench')
+        return icon('pack' if key == 'packing' else 'updates')
     pixmap = QtGui.QPixmap(48, 48)
     pixmap.fill(QtCore.Qt.transparent)
     painter = QtGui.QPainter(pixmap)

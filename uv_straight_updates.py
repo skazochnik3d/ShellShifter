@@ -470,24 +470,12 @@ class UpdateController:
         from uv_straight_icons import ActionButton
         self.manager = manager()
         self.connected = True
-        label = QtWidgets.QLabel('ShellShifter {} · Maya {}'.format(self.manager.current, self.manager.maya))
+        label = QtWidgets.QLabel('ShellShifter ' + self.manager.current)
         layout.addWidget(label)
-        self.status = QtWidgets.QLabel()
-        self.status.setObjectName('updateStatus')
-        self.status.setWordWrap(True)
-        self.status.setTextFormat(QtCore.Qt.PlainText)
-        layout.addWidget(self.status)
         self.button = ActionButton('Check for Updates', 'updates')
         self.button.setObjectName('checkForUpdates')
         self.button.clicked.connect(self.manager.manual_check)
         layout.addWidget(self.button)
-        automatic = QtWidgets.QLabel('Automatic: on startup and every 4 hours')
-        automatic.setWordWrap(True)
-        automatic.setStyleSheet('color:#aaaaaa;')
-        layout.addWidget(automatic)
-        link = QtWidgets.QLabel('<a href="{}">ShellShifter on GitHub</a>'.format(REPOSITORY_URL))
-        link.setOpenExternalLinks(True)
-        layout.addWidget(link)
         window.shortcut_actions['check_updates'] = self.manager.manual_check
         window.destroyed.connect(self.stop)
         self.manager.changed.connect(self.sync)
@@ -495,7 +483,7 @@ class UpdateController:
         self.manager.start()
 
     def sync(self):
-        self.status.setText(self.manager.status)
+        self.button.setToolTip(self.manager.status)
         self.button.setEnabled(not self.manager.busy and not self.manager.pending_restart)
 
     def stop(self, *unused):

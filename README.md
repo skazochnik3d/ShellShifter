@@ -20,7 +20,7 @@ OpenCL 1.2 driver with FP64 support; Unwrap uses Maya's Unfold3D.
 
 ## Updates
 
-Open **Updates** using the wrench icon. **Check for Updates** checks GitHub
+Open **Updates** using the green circular-arrow icon. **Check for Updates** checks GitHub
 releases for your Maya version, including beta releases. ShellShifter also
 checks in the background on opening and every four hours while Maya runs.
 A new version opens a notification with **Download & Install** and **Later**.
@@ -29,7 +29,7 @@ Installation verifies archive and file checksums, backs up the previous files
 and restores them if a replacement fails. Finish active UV operations before
 installing. After installation, save your scene and **restart Maya**. The
 updater keeps scene data, settings, hotkeys and Shelf paths. Connection failures
-appear in Updates without opening automatic error dialogs.
+appear in the Check for Updates tooltip without opening automatic error dialogs.
 
 ## Tools
 

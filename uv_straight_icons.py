@@ -12,7 +12,7 @@ from PySide6.QtSvg import QSvgRenderer
 PANEL_SIZE = 22
 PIE_SIZE = 18
 RASTER_SIZE = 96
-REVISION = 'v8_232'
+REVISION = 'v9_233'
 
 ACTION_ICONS = {
     'unwrap_mesh': 'mesh', 'unfold': 'unfold', 'relax': 'relax',
@@ -52,8 +52,8 @@ BUTTONS.update({'Orient by Longest Side': 'orient',
 BODIES = {
     'wrench': '<path d="M14 3.5C17 1.5 20 2.5 21.5 4L17 8.5L15.5 7L11 11.5L12.5 13L8 17.5L6.5 16L3 19.5L4.5 21L8 17.5L9.5 19L16 12.5C20 13 23 9.5 21.5 6L18 9.5L14.5 6Z" class="panel"/>'
               '<circle cx="5" cy="19" r="1" class="node"/>',
-    'updates': '<path d="M4 11A8 8 0 0 1 18 5L21 8M21 3V8H16M20 13A8 8 0 0 1 6 19L3 16M3 21V16H8" class="accent"/>'
-               '<path d="M12 7V17M8 13L12 17L16 13" class="line"/>',
+    'updates': '<path d="M20 13.6A8.2 8.2 0 1 1 18.1 6.6M17.4 2.8L18.1 6.6L14.3 7.3" '
+               'class="accent" stroke-width="2.5"/>',
     'wireframe': '<path d="M12 2.5L21 7.5V17L12 22L3 17V7.5Z" class="accent"/>'
                  '<path d="M3 7.5L12 12.5L21 7.5M12 12.5V22M7.5 5L16.5 10V19.5M16.5 5L7.5 10V19.5M3 12L12 17L21 12" class="line"/>',
     # A flat carton net: four side panels, two lids and tapered glue flaps.
@@ -197,7 +197,7 @@ ACCENTS = dict(mesh='#e4ad60',unfold='#73bde9',relax='#8cd1c1',pack='#deb577',
                small_shells='#efbd55',hard_edges='#efbd55',overlaps='#91b6ef',
                butterfly='#efbd55',bad_overlaps='#efbd55',cleanup='#efbd55',
                done='#65cf89',done_clear='#65cf89',scene_colors='#8cd1c1',
-               analyse='#dba775',stack='#8cd1c1',window='#e4ad60',popup='#e4ad60',
+               analyse='#dba775',stack='#8cd1c1',window='#e4ad60',popup='#e4ad60',updates='#65cf89',
                straight_h='#ff963b',straight_v='#38c9ff',cylinder='#e4ad60')
 _renderers, _pixmaps, _icons = {}, {}, {}
 
