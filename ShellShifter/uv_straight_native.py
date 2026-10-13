@@ -10,6 +10,58 @@ except ImportError:
     from PySide2 import QtCore
 
 _manager = globals().get('_manager')  # Reload must not orphan active timers.
+_uv_edit_depth = globals().get('_uv_edit_depth', 0)
+
+
+def uv_edit_busy():
+    return _uv_edit_depth > 0
+
+
+@contextmanager
+def uv_edit():
+    """Do not read UV buffers from queued GUI work during projection/cutting."""
+    global _uv_edit_depth
+    import sys
+    from shiboken6 import isValid
+    outer = _uv_edit_depth == 0
+    _uv_edit_depth += 1
+    manager, suspended, paused = _manager, None, []
+    try:
+        if outer:
+            if manager is not None and hasattr(manager, 'scene_suspended') and isValid(manager):
+                suspended = manager.scene_suspended
+                manager.scene_suspended = True
+                for timer in (manager.timer, manager.view_timer):
+                    paused.append((timer, timer.isActive()))
+                    timer.stop()
+                manager.live_viewport_preview.clear()
+            density = sys.modules.get('uv_straight_texel_ui')
+            display = getattr(density, '_display', None)
+            if display is not None and isValid(display):
+                paused.append((display.timer, display.timer.isActive()))
+                display.timer.stop()
+                display.dirty = True
+            wheel = sys.modules.get('uv_straight_wheel')
+            service = getattr(wheel, '_service', None)
+            if service is not None and isValid(service):
+                service.timer.stop()
+                service.selection = None
+                service.remainder = 0.
+        yield
+    finally:
+        _uv_edit_depth -= 1
+        if outer:
+            if suspended is not None and manager is _manager and isValid(manager) and not manager.stopped:
+                manager.scene_suspended = suspended
+                manager.force_distortion = True
+                manager.changes.invalidate()
+                def refresh():
+                    if isValid(manager) and manager is _manager and not manager.stopped:
+                        manager.refresh()
+                QtCore.QTimer.singleShot(0, refresh)
+            for timer, active in paused:
+                if active and isValid(timer):
+                    timer.start()
 
 
 class DisplayState(QtCore.QObject):

@@ -301,22 +301,26 @@ def unfold(mesh):
     # holes no longer disables native unfolding for the other, valid disks.
     disks = [shell for shell in shells if mesh.shell_ids[min(shell)] in surface.disks]
     periodic = [shell for shell in shells if mesh.shell_ids[min(shell)] not in surface.disks]
-    for shell in periodic:
+    # Both native solvers preprocess the mesh. Degenerate 3D triangles are
+    # unsafe even when the selected UV island itself has a valid outline.
+    native_geometry_safe = bool(len(surface.valid) and np.all(surface.valid))
+    legacy_shells = periodic + [shell for shell in disks if surface.quality(shell, positions)[0]]
+    for shell in legacy_shells if native_geometry_safe else ():
         # Maya's legacy global solver safely supports periodic UV topology.
         # This is also the fallback for partial slits; it never adds seams.
         cmds.unfold(mesh.components(shell), iterations=100, pinSelected=False,
                     pinUvBorder=False, applyToShell=True, useScale=False,
                     globalBlend=1., globalMethodBlend=.5)
-    if periodic:
+    if legacy_shells and native_geometry_safe:
         legacy = Mesh(mesh.path)
-        for shell in periodic:
+        for shell in legacy_shells:
             if _better(surface.quality(shell, legacy.points), surface.quality(shell, positions)):
                 positions.update({i: legacy.points[i] for i in shell})
         _write(legacy, positions, commit)
     # Unfold3D preprocesses the whole mesh even for a UV subset. Folded
     # periodic faces elsewhere on this mesh can crash it while solving caps.
-    unsafe_periodic = any(surface.quality(shell, positions)[0] for shell in periodic)
-    if disks and not unsafe_periodic:
+    unsafe_uvs = any(surface.quality(shell, positions)[0] for shell in shells)
+    if disks and native_geometry_safe and not unsafe_uvs:
         components = ['{}.map[{}]'.format(mesh.name, i) for shell in disks for i in sorted(shell)]
         cmds.select(components, replace=True)
         cmds.u3dUnfold(ite=5, p=0, bi=1, tf=1, ms=1024, rs=0)

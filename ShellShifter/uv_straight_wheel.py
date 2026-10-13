@@ -4,7 +4,8 @@ import math
 import maya.cmds as cmds
 import maya.OpenMayaUI as omui
 from PySide6 import QtCore, QtGui, QtWidgets
-from shiboken6 import wrapInstance
+from shiboken6 import wrapInstance, isValid
+_service = globals().get('_service')
 
 
 def selection_key():
@@ -104,6 +105,7 @@ class AngleHud(QtWidgets.QWidget):
 
 
 class AngleWheel(QtCore.QObject):
+    feedback_changed = QtCore.Signal(str)
     def __init__(self, window, angle, feedback):
         super().__init__(window)
         self.angle = angle
@@ -128,8 +130,13 @@ class AngleWheel(QtCore.QObject):
             self.remainder = 0.
             self.selection = None
 
-    def in_uv_editor(self, widget):
-        if not isinstance(widget, QtWidgets.QWidget):
+    def in_uv_editor(self, widget, point=None):
+        # Qt 6.8 also sends wheel input to the native render QWindow. Resolve
+        # its position back to the editor rather than dropping those events.
+        native_window = isinstance(widget, QtGui.QWindow)
+        if native_window and point is not None:
+            widget = QtWidgets.QApplication.widgetAt(point)
+        if not isinstance(widget, QtWidgets.QWidget) and not native_window:
             return False
         from uv_straight_native import _find_editors
         for editor in _find_editors():
@@ -137,17 +144,29 @@ class AngleWheel(QtCore.QObject):
             pointer = omui.MQtUtil.findControl(control) if control else None
             if pointer:
                 root = wrapInstance(int(pointer), QtWidgets.QWidget)
-                if widget == root or root.isAncestorOf(widget):
+                if isinstance(widget, QtWidgets.QWidget) and (widget == root or root.isAncestorOf(widget)):
+                    return True
+                if (native_window and widget is None and point is not None and root.isVisible()
+                        and root.rect().contains(root.mapFromGlobal(point))):
                     return True
         return False
 
     def eventFilter(self, watched, event):
+        logical_modifiers = (QtCore.Qt.ShiftModifier | QtCore.Qt.ControlModifier |
+                             QtCore.Qt.AltModifier | QtCore.Qt.MetaModifier)
         if (self.stopped or event.type() != QtCore.QEvent.Wheel or not keymaps.enabled('wheel') or
-                event.modifiers() != keymaps.modifiers('wheel')):
+                event.modifiers() & logical_modifiers != keymaps.modifiers('wheel') or
+                QtWidgets.QApplication.activeModalWidget() is not None):
             return False
         try:
-            if not self.in_uv_editor(watched):
+            inside = (self.in_uv_editor(watched, event.globalPosition().toPoint())
+                      if isinstance(watched, QtGui.QWindow) else self.in_uv_editor(watched))
+            if not inside:
                 return False
+            from uv_straight_native import uv_edit_busy
+            if uv_edit_busy():
+                event.accept()
+                return True
             selected = selection_key()
             if not selected:
                 return False
@@ -169,11 +188,14 @@ class AngleWheel(QtCore.QObject):
             event.accept()
             return True
         except (RuntimeError, ValueError) as error:
-            self.feedback.setText(str(error))
+            self.notify(str(error))
             return False
 
     def apply(self):
         if self.stopped or not keymaps.enabled('wheel'):
+            return
+        from uv_straight_native import uv_edit_busy
+        if uv_edit_busy():
             return
         # Never apply a queued wheel operation to a newly selected shell.
         if selection_key() != self.selection:
@@ -182,16 +204,20 @@ class AngleWheel(QtCore.QObject):
             import uv_straight as uv
             if self.angle.value() == 0:
                 uv.unpin(whole_shell=True)
-                self.feedback.setText('Auto H/V: 0° · Pins removed from selected shells')
+                self.notify('Auto H/V: 0° · Pins removed from selected shells')
             else:
                 count = uv.auto_mark(self.angle.value(), whole_shells=True)
-                self.feedback.setText('Auto H/V: {:.0f}° · {} groups'.format(self.angle.value(), count))
+                self.notify('Auto H/V: {:.0f}° · {} groups'.format(self.angle.value(), count))
             import uv_straight_native as native
             if native._manager is not None:
                 native._manager.changes.invalidate()
                 native._manager.refresh()
         except (RuntimeError, ValueError) as error:
-            self.feedback.setText(str(error))
+            self.notify(str(error))
+
+    def notify(self, text):
+        self.feedback.setText(text)
+        self.feedback_changed.emit(text)
 
     def stop(self):
         if self.stopped:
@@ -206,3 +232,71 @@ class AngleWheel(QtCore.QObject):
             app.aboutToQuit.disconnect(self.stop)
         except (RuntimeError, TypeError):
             pass
+
+
+class PaletteWheelBinding:
+    """A palette follows the shared angle; closing it keeps the gesture alive."""
+    def __init__(self, window, angle, feedback, service):
+        self.service, self.angle, self.feedback = service, angle, feedback
+        self.stopped = False
+        self.changed = lambda value: service.angle.setValue(value)
+        self.updated = lambda value: angle.setValue(value) if isValid(angle) else None
+        self.message = lambda text: feedback.setText(text) if isValid(feedback) else None
+        angle.valueChanged.connect(self.changed)
+        service.angle.valueChanged.connect(self.updated)
+        service.feedback_changed.connect(self.message)
+        window.destroyed.connect(self.stop)
+
+    def __getattr__(self, name):
+        return getattr(self.service, name)
+
+    def stop(self, *unused):
+        if self.stopped:
+            return
+        self.stopped = True
+        connections = []
+        if isValid(self.angle):
+            connections.append((self.angle.valueChanged, self.changed))
+        if isValid(self.service):
+            connections.extend(((self.service.angle.valueChanged, self.updated),
+                                (self.service.feedback_changed, self.message)))
+        for signal, slot in connections:
+            try:
+                signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+
+
+def ensure_service():
+    global _service
+    if _service is not None and isValid(_service) and not _service.stopped:
+        return _service
+    pointer = omui.MQtUtil.mainWindow()
+    parent = wrapInstance(int(pointer), QtWidgets.QWidget) if pointer else None
+    host = QtWidgets.QWidget(parent, QtCore.Qt.Tool | QtCore.Qt.WindowDoesNotAcceptFocus)
+    host.setObjectName('uvStraightWheelHost')
+    host.setAttribute(QtCore.Qt.WA_QuitOnClose, False)
+    angle = QtWidgets.QDoubleSpinBox(host)
+    angle.setRange(0., 45.)
+    angle.setValue(float(cmds.optionVar(query='uvStraightAutoAngle'))
+                   if cmds.optionVar(exists='uvStraightAutoAngle') else 15.)
+    angle.valueChanged.connect(lambda value: cmds.optionVar(floatValue=('uvStraightAutoAngle', value)))
+    feedback = QtWidgets.QLabel(host)
+    host.hide()
+    _service = AngleWheel(host, angle, feedback)
+    _service.host = host  # Retain the hidden QWidget when Maya has no main window.
+    return _service
+
+
+def bind_palette(window, angle, feedback):
+    service = ensure_service()
+    service.angle.setValue(angle.value())
+    return PaletteWheelBinding(window, angle, feedback, service)
+
+
+def shutdown_service():
+    global _service
+    if _service is not None and isValid(_service):
+        _service.stop()
+        _service.parent().deleteLater()
+    _service = None

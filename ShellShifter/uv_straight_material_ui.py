@@ -15,12 +15,18 @@ class MaterialDelegate(QtWidgets.QStyledItemDelegate):
         return QtCore.QSize(120, CELL_HEIGHT)
 
     def paint(self, painter, option, index):
+        # Maya 2027 paints its square selection under the custom delegate.
+        # Cover that cell before drawing the same rounded button as Maya 2025.
+        painter.fillRect(option.rect, QtGui.QColor('#383838'))
         if index.data(QtCore.Qt.UserRole) is None:
             return
         painter.save()
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         rect = QtCore.QRectF(option.rect).adjusted(3.5, 3.5, -3.5, -3.5)
-        selected = bool(option.state & QtWidgets.QStyle.State_Selected)
+        view = self.parent()
+        selection = view.selectionModel() if isinstance(view, QtWidgets.QAbstractItemView) else None
+        selected = (selection.isSelected(index) if selection is not None else
+                    bool(option.state & QtWidgets.QStyle.State_Selected))
         hovered = bool(option.state & QtWidgets.QStyle.State_MouseOver)
         enabled = bool(option.state & QtWidgets.QStyle.State_Enabled)
         painter.setBrush(QtGui.QColor('#575d63' if selected else '#505050' if hovered else '#484848'))
@@ -248,7 +254,9 @@ class MaterialController(QtCore.QObject):
 
     def scene_busy(self):
         packing = sys.modules.get('uv_straight_pack_progress')
-        return bool(packing is not None and packing.is_running())
+        native = sys.modules.get('uv_straight_native')
+        return bool((packing is not None and packing.is_running()) or
+                    (native is not None and native.uv_edit_busy()))
 
     def refresh(self, *unused):
         if not self.active or self.stopped:
@@ -343,7 +351,10 @@ class MaterialController(QtCore.QObject):
                         if item.data(QtCore.Qt.UserRole) is not None)
         def apply():
             if not self.stopped and revision == self.selection_request:
-                self.select_uvs(records)
+                if self.scene_busy():
+                    QtCore.QTimer.singleShot(50, apply)
+                else:
+                    self.select_uvs(records)
         QtCore.QTimer.singleShot(0, apply)
 
     def select_uvs(self, records):

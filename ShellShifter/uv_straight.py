@@ -13,7 +13,7 @@ import maya.api.OpenMaya as om
 
 WINDOW = 'uvStraightQtWindowWorkspaceControl'
 PRODUCT_NAME = 'ShellShifter'
-VERSION = '1.4.235'
+VERSION = '1.4.236'
 MARK_ATTR = 'uvStraightConstraints'
 _preview = None
 _window = None
@@ -1142,6 +1142,8 @@ def unwrap_from_edges(max_deviation=15.0, straighten_quads=False,
         chosen = _selected_edge_ids(selection, mesh)
         if any(count > 2 for count in mesh.edge_faces.values()):
             raise ValueError('Non-manifold edges must be repaired before automatic unwrap.')
+        if cmds.polyInfo(mesh.name, nonManifoldVertices=True):
+            raise ValueError('Non-manifold vertices must be repaired before automatic unwrap.')
         hard = {edge for edge in range(mesh.fn.numEdges)
                 if mesh.edge_faces[edge] == 2 and not mesh.fn.isEdgeSmooth(edge)}
         cuts = {edge for edge in chosen | hard if mesh.edge_faces[edge] == 2}
@@ -1154,7 +1156,8 @@ def unwrap_from_edges(max_deviation=15.0, straighten_quads=False,
     rectangular = 0
     rectangular_shells = defaultdict(list)
     label = 'ShellShifter Unwrap Cylinder' if straighten_quads else 'ShellShifter Unwrap From Edges'
-    with _undo(label):
+    from uv_straight_native import uv_edit
+    with uv_edit(), _undo(label):
         try:
             for mesh, cuts in plans:
                 _save_marks(mesh, [])

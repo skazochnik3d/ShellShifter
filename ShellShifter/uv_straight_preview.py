@@ -1016,7 +1016,12 @@ def show_window(popup=False):
         target = layout if target is None else target
         item = (ActionButton(text, BUTTONS[text], dark=bool(color))
                 if text in BUTTONS else QtWidgets.QPushButton(text))
-        item.clicked.connect(partial(uv._run, callback))
+        def invoke():
+            # Let Qt finish button delivery before Maya replaces UV/DG data.
+            # Native Unfold may pump paint events while it is solving.
+            from uv_straight_menu import after_menu_interaction
+            after_menu_interaction(partial(uv._run, callback))
+        item.clicked.connect(invoke)
         register_button(window, text, callback)
         if color:
             item.setStyleSheet(item.styleSheet() + 'QPushButton { background: ' + color + '; color: #111820; font-weight: bold; }')
@@ -1103,8 +1108,7 @@ def show_window(popup=False):
     import uv_straight_keymaps as keymaps
     importlib.reload(keymaps)
     wheel_feedback.setText('UV Editor: ' + keymaps.text('wheel') + ' = Auto H/V angle ±1°')
-    if not popup:
-        window.angle_wheel = uv_straight_wheel.AngleWheel(window, angle, wheel_feedback)
+    window.angle_wheel = uv_straight_wheel.bind_palette(window, angle, wheel_feedback)
     layout = window.sections['align'].content
     quads_button = button('Straighten Quads',
                           lambda: uv.quick_straighten_quads('H', angle.value()))

@@ -157,7 +157,7 @@ def _write_original_face_sets(shape: str, face_sets) -> None:
 
 def _original_shapes() -> List[str]:
     return sorted(set(cmds.ls("*.{}".format(ORIGINAL_ATTR),
-                              objectsOnly=True, long=True) or []))
+                              objectsOnly=True, long=True, recursive=True) or []))
 
 
 def _migrate_legacy_originals() -> None:
