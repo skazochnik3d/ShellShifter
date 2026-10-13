@@ -1,0 +1,153 @@
+﻿ShellShifter 1.4.232-beta — installation for Maya 2025 / 2027
+==================================================
+
+Requirements
+------------
+Tested environment: Windows, Autodesk Maya 2025 / 2027.
+Uses Maya's bundled Python, Qt and NumPy; no separate Python packages needed.
+GPU packing requires OpenCL 1.2, double precision (FP64) and an OpenCL-enabled
+graphics driver. CUDA Toolkit, PyOpenCL and UVPackmaster are not required.
+Unwrap Mesh uses Maya's standard Unfold3D plug-in.
+
+Installation
+------------
+1. Extract the entire ZIP into a permanent, writable folder, for example
+   Documents\MayaTools. It contains a folder named ShellShifter_1.4.232-beta.
+2. Start Maya 2025 / 2027 and select the Shelf tab for the new button.
+3. Drag install_shellshifter.py from the extracted folder into Maya's
+   3D viewport. Do not drag the ZIP or shellshifter.py.
+4. A ShellShifter button labelled SS appears on that shelf; the panel opens.
+5. Choose Save All Shelves from the Shelf menu to keep the button.
+6. After restarting Maya, click SS to launch ShellShifter.
+
+Keep the extracted folder in its installation location: the shelf button
+stores its path. Keep every uv_straight*.py file and the assets subfolder
+beside shellshifter.py and install_shellshifter.py. The installer creates a
+shelf button; it does not copy the files elsewhere. No administrator access
+is needed, and userSetup.py is not modified.
+
+If drag and drop does not work
+-----------------------------
+Open Windows > General Editors > Script Editor, select its Python tab and
+run the following code, replacing the example with your extracted folder:
+
+    import sys
+    folder = r'C:\path\to\ShellShifter_1.4.232-beta'
+    if folder not in sys.path:
+        sys.path.insert(0, folder)
+    import install_shellshifter
+    install_shellshifter.onMayaDroppedPythonFile()
+
+This runs the same installer, adds the shelf button and opens the panel.
+
+Getting started
+---------------
+Open the UV Editor and select a mesh, UVs or UV shells.
+Choose a section from ShellShifter's sidebar:
+- Unwrap: Unwrap Mesh cuts selected and hard edges, builds a geometry-based
+  seed and refines it without pins. A free edge/diagonal length pass reduces
+  unwanted bending and uneven stretch, then Orient Shells and silent
+  automatic packing finish the operation.
+  Existing pins are cleared and no H/V pins are assigned automatically.
+  One Undo restores the whole operation. Unfold and Relax use your assigned pins.
+- Packing: Pack UVs repacks selected shells; Pack to Other fits them around
+  unselected shells, keeping those shells fixed.
+- Packing: To Square stretches selected shells from the bottom half
+  to the full square: V ×2 around V=0. To Rectangle reverses it: V ×0.5.
+  U stays unchanged; selecting part of a shell includes the whole shell.
+  Each conversion is a single Undo operation.
+- Packing: UV Area sets the packing bounds. Square uses the full tile;
+  Bottom Half uses the bottom half of the tile: U 0–1, V 0–0.5.
+  Shell proportions stay unchanged. Pixel margins use the square Texture Size
+  and the chosen area boundaries. Pack UVs and Pack to Other share this setting;
+  free space is measured relative to the chosen area.
+- Orient & Straighten: Orient Shells rotates each selected shell to the nearest
+  U/V axis, at most 45 degrees. Two UV points define a line; more points fit
+  selected contour directions. Shell shape and scale are preserved.
+- Orient & Straighten: Straighten Quads rectangularizes selected
+  quad shells and marks their H/V borders. It does not run Unfold afterward.
+  The entire operation is a single Undo.
+- Materials: compact two-column buttons show full material names without
+  nested groups, in reading order. Click selects UVs, Ctrl adds materials,
+  Shift selects a range. Tooltips show full long names. Each object's
+  current UV set is used.
+- UV Checks: pixel and map-size settings are at the start of Shells & Edges. Actions are grouped
+  into Shells & Edges, Overlaps and UV Sets.
+- UV Checks: Select Overlaps selects all intersecting shells. Check Overlaps
+  selects invalid shells; at least 99% UV area agreement is accepted.
+  Agreement means intersection area / union area (IoU).
+- UV Checks: Fix Butterfly Overlaps restores sewn fold boundaries on selected
+  meshes or shells. UV coordinates are kept; the operation supports Undo.
+- Move Overlaps: Stack Similar Shells aligns selected copies with matching
+  surface geometry and UV topology to their least distorted template. All UV
+  points in the current UV set are corrected. One Undo restores every shell
+  and H/V guide; one Redo reapplies the stack. It is also
+  available in Pie Menu and Keymaps. Incompatible shells are skipped.
+- Distortion: repaired shell proportions clear false distortion colors.
+  The calculation follows current UVs and updates after Undo/Redo.
+- Display: Wireframe toggles mesh wires in 3D views. Show H/V Pins and
+  Show Distortion remain independent. UVs, selection, preview colors and
+  UV Undo/Redo history are preserved.
+- Texel Density: Analyse & Show enables live colors after UV edits and
+  Undo/Redo. Green uses the initial mean density as a fixed reference;
+  Clear stops the display.
+- Pie Menu: action captions match the palette controls. Existing default
+  captions update on load without moving entries. Edit Pins adds/removes
+  an H/V edge on a short click; dragging passes to the Maya tool and preserves
+  H/V guides.
+- Keymaps: customise shortcuts and edit the Pie Menu.
+
+Default shortcuts are active after opening ShellShifter:
+- Alt + Shift + right mouse button: Pie Menu over the UV Editor/3D viewport.
+- Shift + Space: popup panel.
+- Shift + mouse wheel: Auto H/V angle. The current angle appears above
+  the cursor while scrolling, then fades out automatically.
+
+Packing defaults: Texture Size 2048, Shell Spacing 10 px, Border Margin 5 px,
+Search Limit Unlimited. Choose the texture resolution for your project.
+Unlimited searches until Stop and Keep Best; that button stops the search
+and applies the best complete layout. Settings are saved in this user's
+Maya preferences. Enable Undo must be on for UV editing operations.
+
+Updating
+--------
+1. Stop packing and close Maya.
+2. Replace the complete file set in the original folder with the new version,
+   keeping the same path. Do not mix modules from different versions.
+3. Start Maya and click SS.
+If the new version is in another folder, run its installer again on the same
+shelf to update ShellShifter's own button, then save the shelf.
+
+Removing
+--------
+Remove the SS shelf button and save the shelf. Close Maya, then remove
+the extracted ShellShifter folder.
+
+Troubleshooting
+---------------
+- No module named shellshifter: check that the folder has not moved and the
+  ZIP was fully extracted; run the installer again from the valid location.
+- OpenCL/GPU error: check FP64/OpenCL support and your graphics driver.
+  GPU packing does not switch automatically to CPU.
+- Unfold3D error: check Maya's standard Unfold3D in the Plug-in Manager.
+- For other errors, send the Script Editor error text, Maya version,
+  ShellShifter version and GPU model to the author.
+
+Only runtime modules, the checker texture and installation documentation
+are included. No test scenes, FBX files, backups, Maya user profiles or
+development data are included.
+
+AUTOMATIC UPDATES
+Open Updates (the wrench icon) and click Check for Updates. The plugin also
+checks public GitHub releases in the background on opening and every 4 hours
+while Maya runs, including beta releases. A new version opens a notification
+with Download & Install / Later. Installation starts only when you click it.
+Finish current UV operations first. Archive/file SHA-256 checks, backups and
+rollback protect installation. After Update installed, save your scene and
+restart Maya. Shelf paths, preferences and userSetup.py remain unchanged.
+Connection failures appear in Updates without automatic error popups.
+Backups remain next to the plugin in ShellShifter_backup_* folders.
+Source and releases: https://github.com/skazochnik3d/ShellShifter
+
+Straighten Quads also supports suitable open ribbons with triangles/n-gons.
+Ribbon guides are followed by constrained Unfold; full quad grids skip it.
