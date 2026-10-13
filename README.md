@@ -16,7 +16,7 @@ Keep the extracted folder in place: the Shelf button uses its path.
 Maya's bundled Python, Qt and NumPy are sufficient. GPU packing needs an
 OpenCL 1.2 driver with FP64 support; Unwrap uses Maya's Unfold3D.
 
-[Русская инструкция](INSTALL_RU.txt) · [English instructions](INSTALL_EN.txt)
+[Русская инструкция](docs/INSTALL_RU.txt) · [English instructions](docs/INSTALL_EN.txt)
 
 ## Updates
 
@@ -52,9 +52,16 @@ opens the pie menu; **Shift + wheel** adjusts the H/V angle with a fading displa
 
 ## Development
 
-The `uv_straight*.py` modules are the runtime; `shellshifter.py` is the entry
-point. Only paths in `runtime_files.json` are included in release archives.
-See [publishing instructions](PUBLISH.md) for building future updates.
+The repository is organized into three folders:
+
+- [`ShellShifter`](ShellShifter/) — plugin modules, installer and checker asset.
+- [`docs`](docs/) — installation, publishing instructions and release notes.
+- [`tools`](tools/) — release builder and runtime file list.
+
+Only files listed in `tools/runtime_files.json` are included in install archives.
+Archives keep all modules beside `install_shellshifter.py` in one plugin folder.
+If installing from a source-code archive, open the `ShellShifter` folder first.
+See [publishing instructions](docs/PUBLISH.md) for building future updates.
 
 The current runtime was verified in Maya 2025 and 2027. Release checks cover
 the updater, rollback, GUI responsiveness, palette/pie/shortcut integration,

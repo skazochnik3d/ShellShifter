@@ -44,7 +44,8 @@ def asset_name(version, maya):
     version_key(version)
     if str(maya) not in ('2025', '2027'):
         raise ValueError('Updates support Maya 2025 and 2027.')
-    return 'ShellShifter_Maya{}_v{}_Install.zip'.format(maya, version.replace('-', '_'))
+    number = str(version).removeprefix('v').split('-', 1)[0]
+    return 'ShellShifter_Maya{}_v{}_Install.zip'.format(maya, number)
 
 
 def _asset_url(asset, tag):
@@ -72,6 +73,11 @@ def choose_release(releases, current, maya):
         version = tag.removeprefix('v')
         name = asset_name(version, maya)
         assets = [a for a in release.get('assets', []) if a.get('name') == name]
+        if not assets:
+            # Releases already installed by other users may still use the old
+            # beta suffix in asset names. Accept both during the transition.
+            name = 'ShellShifter_Maya{}_v{}_Install.zip'.format(maya, version.replace('-', '_'))
+            assets = [a for a in release.get('assets', []) if a.get('name') == name]
         if key <= current_key or len(assets) != 1:
             continue
         asset = assets[0]

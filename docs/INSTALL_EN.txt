@@ -1,4 +1,4 @@
-﻿ShellShifter 1.4.234-beta — installation for Maya 2025 / 2027
+﻿ShellShifter 1.4.235 — installation for Maya 2025 / 2027
 ==================================================
 
 Requirements
@@ -12,7 +12,7 @@ Unwrap Mesh uses Maya's standard Unfold3D plug-in.
 Installation
 ------------
 1. Extract the entire ZIP into a permanent, writable folder, for example
-   Documents\MayaTools. It contains a folder named ShellShifter_1.4.234-beta.
+   Documents\MayaTools. It contains a folder named ShellShifter_1.4.235.
 2. Start Maya 2025 / 2027 and select the Shelf tab for the new button.
 3. Drag install_shellshifter.py from the extracted folder into Maya's
    3D viewport. Do not drag the ZIP or shellshifter.py.
@@ -32,7 +32,7 @@ Open Windows > General Editors > Script Editor, select its Python tab and
 run the following code, replacing the example with your extracted folder:
 
     import sys
-    folder = r'C:\path\to\ShellShifter_1.4.234-beta'
+    folder = r'C:\path\to\ShellShifter_1.4.235'
     if folder not in sys.path:
         sys.path.insert(0, folder)
     import install_shellshifter
