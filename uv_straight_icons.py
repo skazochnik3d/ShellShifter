@@ -12,7 +12,7 @@ from PySide6.QtSvg import QSvgRenderer
 PANEL_SIZE = 22
 PIE_SIZE = 18
 RASTER_SIZE = 96
-REVISION = 'v9_233'
+REVISION = 'v10_234'
 
 ACTION_ICONS = {
     'unwrap_mesh': 'mesh', 'unfold': 'unfold', 'relax': 'relax',
@@ -53,7 +53,7 @@ BODIES = {
     'wrench': '<path d="M14 3.5C17 1.5 20 2.5 21.5 4L17 8.5L15.5 7L11 11.5L12.5 13L8 17.5L6.5 16L3 19.5L4.5 21L8 17.5L9.5 19L16 12.5C20 13 23 9.5 21.5 6L18 9.5L14.5 6Z" class="panel"/>'
               '<circle cx="5" cy="19" r="1" class="node"/>',
     'updates': '<path d="M20 13.6A8.2 8.2 0 1 1 18.1 6.6M17.4 2.8L18.1 6.6L14.3 7.3" '
-               'class="accent" stroke-width="2.5"/>',
+               'class="refresh"/>',
     'wireframe': '<path d="M12 2.5L21 7.5V17L12 22L3 17V7.5Z" class="accent"/>'
                  '<path d="M3 7.5L12 12.5L21 7.5M12 12.5V22M7.5 5L16.5 10V19.5M16.5 5L7.5 10V19.5M3 12L12 17L21 12" class="line"/>',
     # A flat carton net: four side panels, two lids and tapered glue flaps.
@@ -220,6 +220,7 @@ def svg(action, dark=False, highlight=False):
             '.panel{{fill:url(#panel);stroke:{accent}}}'
             '.shade{{fill:{accent};fill-opacity:.28;stroke:{accent}}}'
             '.accent{{fill:none;stroke:{accent}}}.line{{fill:none;stroke:{line};stroke-width:1.4}}'
+            '.refresh{{fill:none;stroke:{accent};stroke-width:2.5}}'
             '.node{{fill:{line};stroke:none}}.pin{{fill:#efbd55;stroke:{line};stroke-width:.7}}'
             '.spark{{fill:none;stroke:#ffd36c}}.warning{{fill:none;stroke:{warning};stroke-width:2}}'
             '.success{{fill:none;stroke:{success};stroke-width:2}}'

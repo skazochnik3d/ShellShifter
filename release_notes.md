@@ -1,4 +1,4 @@
-ShellShifter 1.4.233-beta for Maya 2025 and 2027 on Windows.
+ShellShifter 1.4.234-beta for Maya 2025 and 2027 on Windows.
 
 - Compact Updates menu: only the ShellShifter version and Check for Updates.
 - Removed Maya version, status text, automatic-check description and GitHub link

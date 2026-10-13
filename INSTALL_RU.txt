@@ -1,4 +1,4 @@
-﻿ShellShifter 1.4.233-beta — установка для Maya 2025 / 2027
+﻿ShellShifter 1.4.234-beta — установка для Maya 2025 / 2027
 ================================================
 
 Требования
@@ -12,7 +12,7 @@ Python, Qt и NumPy используются из комплекта Maya: от�
 Установка
 ---------
 1. Полностью распакуйте ZIP в постоянную папку с правом записи, например
-   в Documents\MayaTools. Внутри появится папка ShellShifter_1.4.233-beta.
+   в Documents\MayaTools. Внутри появится папка ShellShifter_1.4.234-beta.
 2. Откройте Maya 2025 / 2027 и выберите вкладку Shelf, куда хотите добавить кнопку.
 3. Из Проводника перетащите install_shellshifter.py из распакованной папки
    в 3D-вьюпорт Maya. Не перетаскивайте ZIP или shellshifter.py.
@@ -33,7 +33,7 @@ Python, Qt и NumPy используются из комплекта Maya: от�
 и выполните следующий код, указав путь к своей распакованной папке:
 
     import sys
-    folder = r'C:\path\to\ShellShifter_1.4.233-beta'
+    folder = r'C:\path\to\ShellShifter_1.4.234-beta'
     if folder not in sys.path:
         sys.path.insert(0, folder)
     import install_shellshifter

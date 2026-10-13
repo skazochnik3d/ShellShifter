@@ -10,7 +10,7 @@
    corresponding tag and all three assets, for example:
 
 ```powershell
-gh release create v1.4.233-beta build/ShellShifter_Maya2025_v1.4.233_beta_Install.zip build/ShellShifter_Maya2027_v1.4.233_beta_Install.zip build/ShellShifter_updates.json --prerelease --title "ShellShifter 1.4.233-beta" --notes-file release_notes.md
+gh release create v1.4.234-beta build/ShellShifter_Maya2025_v1.4.234_beta_Install.zip build/ShellShifter_Maya2027_v1.4.234_beta_Install.zip build/ShellShifter_updates.json --prerelease --title "ShellShifter 1.4.234-beta" --notes-file release_notes.md
 ```
 
 The tag version, core version, ZIP names and manifest versions must match.
