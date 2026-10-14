@@ -50,6 +50,8 @@
   "uv_straight_preview.py",
   "uv_straight_qt_native.py",
   "uv_straight_raster.py",
+  "uv_straight_report_config.py",
+  "uv_straight_reports.py",
   "uv_straight_ribbon.py",
   "uv_straight_section_drag.py",
   "uv_straight_stack.py",

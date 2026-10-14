@@ -1,0 +1,23 @@
+{
+  "name": "shellshifter-reports",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-10-14",
+  "workers_dev": true,
+  "preview_urls": false,
+  "vars": {
+    "PUBLIC_ORIGIN": "",
+    "REPORTS_ENABLED": "false"
+  },
+  "r2_buckets": [
+    { "binding": "IMAGES", "bucket_name": "shellshifter-bug-screenshots" }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "QUOTA", "class_name": "ReportQuota" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ReportQuota"] }],
+  "ratelimits": [
+    { "name": "INTAKE_LIMIT", "namespace_id": "23701", "simple": { "limit": 5, "period": 60 } },
+    { "name": "IMAGE_LIMIT", "namespace_id": "23702", "simple": { "limit": 60, "period": 60 } }
+  ],
+  "observability": { "enabled": false }
+}

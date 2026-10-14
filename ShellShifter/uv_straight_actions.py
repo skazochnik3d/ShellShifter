@@ -55,6 +55,7 @@ CATALOG = (
     ('overlap_analyse', 'Move Overlaps', 'Analyse Copies'),
     ('stack_shells', 'Move Overlaps', 'Stack Similar Shells'),
     ('check_updates', 'Updates', 'Check for Updates'),
+    ('report_bug', 'Updates', 'Report a Bug'),
     ('window', 'ShellShifter', 'Open ShellShifter'),
     ('popup', 'ShellShifter', 'Toggle Popup'),
 )

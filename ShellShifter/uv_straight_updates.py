@@ -483,6 +483,12 @@ class UpdateController:
         self.button.clicked.connect(self.manager.manual_check)
         layout.addWidget(self.button)
         window.shortcut_actions['check_updates'] = self.manager.manual_check
+        from uv_straight_reports import show_report
+        self.report_button = ActionButton('Report a Bug', 'report_bug')
+        self.report_button.setObjectName('reportBug')
+        self.report_button.clicked.connect(show_report)
+        layout.addWidget(self.report_button)
+        window.shortcut_actions['report_bug'] = show_report
         window.destroyed.connect(self.stop)
         self.manager.changed.connect(self.sync)
         self.sync()

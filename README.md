@@ -31,6 +31,14 @@ installing. After installation, save your scene and **restart Maya**. The
 updater keeps scene data, settings, hotkeys and Shelf paths. Connection failures
 appear in the Check for Updates tooltip without opening automatic error dialogs.
 
+**Report a Bug** opens a modeless report window with a description, screenshot
+file/clipboard attachment and preview. Versions are included automatically;
+the user must approve public publication. Send runs in the background and
+returns a GitHub Issue link. The reporting service must first be connected by
+the maintainer; an empty endpoint keeps Send disabled. No scene files, paths,
+automatic screenshots or credentials are collected by the plugin.
+See [service setup](https://github.com/skazochnik3d/ShellShifter/blob/main/docs/BUG_REPORTS_SETUP_RU.md).
+
 ## Tools
 
 - **Unwrap:** cuts selected/hard edges, unfolds, orients and packs silently.
@@ -52,11 +60,12 @@ opens the pie menu; **Shift + wheel** adjusts the H/V angle with a fading displa
 
 ## Development
 
-The repository is organized into three folders:
+The repository is organized into four folders:
 
 - [`ShellShifter`](ShellShifter/) — plugin modules, installer and checker asset.
 - [`docs`](docs/) — installation, publishing instructions and release notes.
 - [`tools`](tools/) — release builder and runtime file list.
+- [`services`](services/) — optional bug-report service; excluded from plugin archives.
 
 Only files listed in `tools/runtime_files.json` are included in install archives.
 Archives keep all modules beside `install_shellshifter.py` in one plugin folder.

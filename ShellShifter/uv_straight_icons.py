@@ -12,7 +12,7 @@ from PySide6.QtSvg import QSvgRenderer
 PANEL_SIZE = 22
 PIE_SIZE = 18
 RASTER_SIZE = 96
-REVISION = 'v10_234'
+REVISION = 'v11_237'
 
 ACTION_ICONS = {
     'unwrap_mesh': 'mesh', 'unfold': 'unfold', 'relax': 'relax',
@@ -37,6 +37,7 @@ ACTION_ICONS = {
     'original_set': 'original_set', 'original_clear': 'clear',
     'original_color': 'eye', 'overlap_analyse': 'analyse', 'stack_shells': 'stack',
     'window': 'window', 'popup': 'popup', 'check_updates': 'updates',
+    'report_bug': 'report_bug',
 }
 
 from uv_straight_actions import CATALOG
@@ -50,6 +51,9 @@ BUTTONS.update({'Orient by Longest Side': 'orient',
 
 # Rounded outlines, shaded panels and the same gold/cyan/mint accents as the rail.
 BODIES = {
+    'report_bug': '<rect x="6" y="8" width="12" height="12" rx="5" class="panel"/>'
+                  '<path d="M9 8V5H15V8M12 9V19M6 11H3M6 15H2M7 18L4 21M18 11H21M18 15H22M17 18L20 21" class="line"/>'
+                  '<path d="M9 5L7 2M15 5L17 2" class="accent"/>',
     'wrench': '<path d="M14 3.5C17 1.5 20 2.5 21.5 4L17 8.5L15.5 7L11 11.5L12.5 13L8 17.5L6.5 16L3 19.5L4.5 21L8 17.5L9.5 19L16 12.5C20 13 23 9.5 21.5 6L18 9.5L14.5 6Z" class="panel"/>'
               '<circle cx="5" cy="19" r="1" class="node"/>',
     'updates': '<path d="M20 13.6A8.2 8.2 0 1 1 18.1 6.6M17.4 2.8L18.1 6.6L14.3 7.3" '
@@ -198,7 +202,7 @@ ACCENTS = dict(mesh='#e4ad60',unfold='#73bde9',relax='#8cd1c1',pack='#deb577',
                butterfly='#efbd55',bad_overlaps='#efbd55',cleanup='#efbd55',
                done='#65cf89',done_clear='#65cf89',scene_colors='#8cd1c1',
                analyse='#dba775',stack='#8cd1c1',window='#e4ad60',popup='#e4ad60',updates='#65cf89',
-               straight_h='#ff963b',straight_v='#38c9ff',cylinder='#e4ad60')
+               straight_h='#ff963b',straight_v='#38c9ff',cylinder='#e4ad60',report_bug='#8cd1c1')
 _renderers, _pixmaps, _icons = {}, {}, {}
 
 
