@@ -5,7 +5,7 @@ import weakref
 import maya.cmds as cmds
 from PySide6 import QtCore, QtGui, QtWidgets
 from shiboken6 import isValid, wrapInstance
-from uv_straight_actions import CATALOG, BY_ID
+from uv_straight_actions import ASSIGNABLE_CATALOG, BY_ID, tooltip_label
 
 OPTION = 'shellShifterCustomKeymaps'
 _clients = globals().get('_clients', weakref.WeakSet())
@@ -132,7 +132,7 @@ class CustomBindingsUI(QtWidgets.QWidget):
         self.plus = PieFooterButton(self)
         self.plus.setAccessibleName('Add Hotkey')
         self.plus.setObjectName('addFunctionShortcut')
-        self.plus.setToolTip('Add a shortcut for a ShellShifter function')
+        self.plus.setToolTip('Add a shortcut for a ShellShifter action')
         self.plus.clicked.connect(self.choose_function)
         self.layout.addWidget(self.plus,0,QtCore.Qt.AlignHCenter)
         self.plus.show()
@@ -161,7 +161,7 @@ class CustomBindingsUI(QtWidgets.QWidget):
                 widget.checkbox = VisibleCheckBox()
                 widget.checkbox.setText(QtGui.QFontMetrics(widget.checkbox.font()).elidedText(
                     title, QtCore.Qt.ElideRight, 110))
-                widget.checkbox.setToolTip(BY_ID[action][0]+' · '+BY_ID[action][1])
+                widget.checkbox.setToolTip(tooltip_label(BY_ID[action][0])+' · '+tooltip_label(BY_ID[action][1]))
                 widget.checkbox.setStyleSheet('QCheckBox:unchecked { color: #888888; }')
                 widget.checkbox.toggled.connect(lambda value, action=action: set_enabled(action, value))
                 widget.field = BindingField('custom')
@@ -169,13 +169,13 @@ class CustomBindingsUI(QtWidgets.QWidget):
                 widget.field.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
                 # Capture edits into a shared draft. Apply Keymaps activates them.
                 widget.field.recorded.connect(lambda value, action=action: set_draft(action, value))
-                widget.field.setToolTip('Click to record a shortcut, then Apply Keymaps. Custom mouse/wheel shortcuts require a modifier.')
+                widget.field.setToolTip('Click to record a shortcut, then click Apply Keymaps. Custom mouse-button or wheel shortcuts require Ctrl, Alt or Shift.')
                 delete = QtWidgets.QToolButton()
                 delete.setText('×')
                 delete.setObjectName('removeFunctionShortcut_'+action)
                 delete.setFixedSize(24, 24)
                 delete.setStyleSheet('QToolButton { color: #bcbcbc; font-size: 16px; } QToolButton:hover { color: #ff8e83; }')
-                delete.setToolTip('Remove '+BY_ID[action][1]+' shortcut')
+                delete.setToolTip("Remove the shortcut for action '"+tooltip_label(BY_ID[action][1])+'»')
                 delete.clicked.connect(lambda checked=False, action=action: remove(action))
                 row.addWidget(widget.checkbox)
                 row.addWidget(widget.field, 1)
@@ -197,7 +197,7 @@ class CustomBindingsUI(QtWidgets.QWidget):
         editor = self.window.pie_preview
         editor.close_functions()
         picker = FunctionPicker(editor, add, draggable=False, title='Shortcut Functions',
-                                catalog=CATALOG, parent=self)
+                                catalog=ASSIGNABLE_CATALOG, parent=self)
         self.function_picker = picker
         added = {record['action'] for record in _records}
         for button in picker.buttons:

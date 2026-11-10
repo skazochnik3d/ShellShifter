@@ -4,6 +4,7 @@ from shiboken6 import isValid
 import uv_straight_pie as pie
 from uv_straight_pie_drag import PieDragOverlay
 from uv_straight_pie_catalog import FunctionPicker
+from uv_straight_actions import tooltip_label
 
 
 class PieFooterButton(QtWidgets.QToolButton):
@@ -22,7 +23,7 @@ class PieFooterButton(QtWidgets.QToolButton):
     def set_mode(self, dragging, drop_active=False):
         self.dragging,self.drop_active=bool(dragging),bool(drop_active)
         title='Drop Here to Remove Function' if dragging else 'Add Function to Pie Menu'
-        self.setToolTip(title)
+        self.setToolTip('Drop here to remove the action' if dragging else 'Add an action to the marking menu')
         self.setAccessibleName(title)
         self.update()
 
@@ -183,8 +184,9 @@ class NativePieCanvas(QtWidgets.QWidget):
     def add_panel(self, nodes, y, parent, title, metrics):
         from uv_straight_icons import PATHS
         rows = pie.list_rows(nodes)
-        widths = [metrics.horizontalAdvance(row[0].get('label', ''))+46 if len(row) == 1 else
-                  2*(max(metrics.horizontalAdvance(n['label']) for n in row)+34)+10 for row in rows]
+        def requested(node):
+            return metrics.horizontalAdvance(node.get('label',''))+(78 if node.get('action') in pie.COMPOUND_ACTIONS else 46)
+        widths = [requested(row[0]) if len(row)==1 else 2*max(requested(n) for n in row)+10 for row in rows]
         width = min(self.width()-24, max([155]+widths))
         x = (self.width()-width)*.5
         header = 21 if title else 0
@@ -196,7 +198,7 @@ class NativePieCanvas(QtWidgets.QWidget):
             cell_width = (width-10)*.5
             text_heights = []
             for node in row:
-                padding = 27 if self.states.get(node['id']) is not None else 34 if pie.icon_key(node) in PATHS else 12
+                padding = 74 if node.get('action') in pie.COMPOUND_ACTIONS else 27 if self.states.get(node['id']) is not None else 34 if pie.icon_key(node) in PATHS else 12
                 bounds = metrics.boundingRect(QtCore.QRect(0, 0, int(cell_width-padding), 1000),
                                               QtCore.Qt.TextWordWrap, node['label'])
                 text_heights.append(bounds.height()+6)
@@ -220,7 +222,12 @@ class NativePieCanvas(QtWidgets.QWidget):
         return y+height
 
     def hit(self, point):
-        return next((region for region in self.regions if region['rect'].contains(point)), None)
+        region=next((region for region in self.regions if region['rect'].contains(point)), None)
+        if (region and region['node'] and region['node'].get('action') in pie.COMPOUND_ACTIONS and not self.editor.editing):
+            root=region['node']['action']
+            action=next((action for action,rect in pie.compound_parts(root,region['rect']) if rect.contains(point)),pie.COMPOUND_ACTIONS[root][0])
+            return dict(region,action=action)
+        return region
 
     def panel_at(self, point):
         return next((panel for panel in self.panels if panel['rect'].contains(point)), None)
@@ -253,7 +260,7 @@ class NativePieCanvas(QtWidgets.QWidget):
                 continue
             selected = (region['direction'] == self.editor.direction if region['direction'] else
                         node is not None and node['id'] == self.editor.identifier)
-            hovered = region is self.hover
+            hovered = region is self.hover or (self.hover is not None and self.hover.get('node') is node)
             if node is None:
                 if self.editor.editing or self.drop_target:
                     painter.setPen(QtGui.QPen(QtGui.QColor('#61727f'), 1, QtCore.Qt.DashLine))
@@ -279,6 +286,13 @@ class NativePieCanvas(QtWidgets.QWidget):
     def paint_entry(self, painter, region, selected=False, hovered=False):
         """Draw labels and icons at their native size, including during a drag."""
         node, rect = region['node'], region['rect']
+        if node.get('action') in pie.COMPOUND_ACTIONS and not region.get('compound_part'):
+            active=self.hover.get('action') if self.hover is not None and self.hover.get('node') is node else None
+            for action,part_rect in pie.compound_parts(node['action'],rect):
+                part=dict(node,action=action,label=pie.part_label(action,node))
+                self.paint_entry(painter,dict(region,node=part,rect=part_rect,compound_part=True),selected,
+                                 hovered and active in (None,action))
+            return
         painter.save()
         painter.setClipRect(rect.adjusted(-1, -1, 1, 1), QtCore.Qt.IntersectClip)
         painter.setFont(self.menu_font())
@@ -287,13 +301,20 @@ class NativePieCanvas(QtWidgets.QWidget):
             painter.drawLine(QtCore.QLineF(rect.left()+7, rect.center().y(), rect.right()-7, rect.center().y()))
             painter.restore()
             return
-        painter.setPen(QtGui.QPen(QtGui.QColor('#85bbdd' if selected else '#111111'), 1))
-        painter.setBrush(QtGui.QColor('#486080' if selected else '#5a6066' if hovered else '#494949'))
+        state = self.states.get(node['id'])
+        border=('#85bbdd' if selected else '#8bbc9a' if state else '#111111')
+        fill=('#486080' if selected else '#527d60' if state and hovered else
+              '#486b53' if state else '#5a6066' if hovered else '#494949')
+        painter.setPen(QtGui.QPen(QtGui.QColor(border), 1))
+        painter.setBrush(QtGui.QColor(fill))
         painter.drawRoundedRect(rect,self.entry_radius(rect),self.entry_radius(rect))
         start = rect.left()+6
         from uv_straight_icons import PATHS, PIE_SIZE, paint_icon
         key = pie.icon_key(node)
-        state = self.states.get(node['id'])
+        if region.get('compound_part') and node['action'] in ('relax_h','relax_v','rotate_angle'):key=None
+        if region.get('compound_part') and node['action'] in ('rotate_ccw','rotate_cw'):
+            paint_icon(painter,QtCore.QRectF(rect.center().x()-9,rect.center().y()-9,18,18),key)
+            painter.restore();return
         if state is not None:
             box = QtCore.QRectF(start, rect.center().y()-5, 10, 10)
             painter.setPen(QtGui.QPen(QtGui.QColor('#b8b8b8'), 1))
@@ -317,6 +338,8 @@ class NativePieCanvas(QtWidgets.QWidget):
                                                  QtCore.QPointF(right-4, rect.center().y()+3)]))
             right -= 10
         painter.setPen(QtGui.QColor('#e9edf1' if self.entry_enabled(node) else '#858585'))
+        if region.get('compound_part') and node['action'] in ('relax_h','relax_v','rotate_angle'):
+            painter.drawText(rect,QtCore.Qt.AlignCenter,node['label']);painter.restore();return
         text_rect = QtCore.QRectF(start, rect.top(), max(1, right-start), rect.height())
         if region.get('wrap'):
             painter.drawText(text_rect, QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft |
@@ -354,8 +377,8 @@ class NativePieCanvas(QtWidgets.QWidget):
             return
         self.hover = target
         self.setCursor(QtCore.Qt.OpenHandCursor if target and self.editor.editing and target['node'] else QtCore.Qt.ArrowCursor)
-        self.setToolTip((target['node'].get('label', 'Separator') if target and target['node'] else 'Empty position')+
-                        '\nDrag to move. Drop on the trash to remove.')
+        self.setToolTip(tooltip_label(target['node'].get('label', 'Separator') if target and target['node'] else 'Empty position')+
+                        '\nDrag to move. Drop onto the trash to remove.')
         self.update()
 
     def mouseReleaseEvent(self, event):
@@ -731,9 +754,11 @@ class InlinePieEditor(QtWidgets.QWidget):
         return self.open_functions(lambda action:self.add_node(pie.entry(action)))
 
     def add_radial_function(self):
+        direction=self.direction
         def add(action):
             value = pie.layout()
-            empty = next((direction for direction in pie.CLOCKWISE if value['slots'][direction] is None), None)
+            empty=(direction if direction in pie.DIRECTIONS and value['slots'][direction] is None else
+                   next((slot for slot in pie.CLOCKWISE if value['slots'][slot] is None),None))
             node = pie.entry(action)
             if empty:
                 value['slots'][empty] = node

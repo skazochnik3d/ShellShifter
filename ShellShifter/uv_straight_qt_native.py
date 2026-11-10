@@ -3,6 +3,7 @@ from pathlib import Path
 import json
 import math
 import time
+import sys
 import uuid
 from array import array
 from copy import copy
@@ -19,8 +20,10 @@ from uv_straight_overlay import ColorOverlay, ViewportEdgeOverlay
 import uv_straight_bounds_state as bounds_state
 from uv_straight_changes import ChangeTracker
 from uv_straight_distortion import DistortionMesh, VectorGeometry, shell_neutral_scale
-from uv_straight_colors import completion_tint
+from uv_straight_colors import DISTORTION_NEUTRAL, completion_tint, finished_visible
 from uv_straight_live_preview import LiveViewportPreview
+from uv_straight_move_overlaps import ORIGINAL_COLOR_OWNER
+from uv_straight_pin_cache import PinMeshCache,explicit_uv_ids
 
 
 def triangle_scales(a, b, c, uv_a, uv_b, uv_c):
@@ -44,7 +47,7 @@ def triangle_scales(a, b, c, uv_a, uv_b, uv_c):
 
 class LivePayload:
     """Cache guide connectivity; read current UV positions without Mesh rebuilds."""
-    def __init__(self, meshes, distortion_reference=None, geometry_reference=None):
+    def __init__(self, meshes, distortion_reference=None, geometry_reference=None, guide_only=False):
         from uv_straight_native import build_payload
         import uv_straight as uv
         self.entries = []
@@ -64,6 +67,7 @@ class LivePayload:
         self.distortion_computes = 0
         self.distortion_hits = 0
         self.selected_ids = []
+        self.marked_ids = []
         self.selected_points = []
         self.viewport_face_colors = []
         for mesh in meshes:
@@ -77,6 +81,7 @@ class LivePayload:
                 indexed.points = {i: i for i in mesh.points}
             counts, ids = mesh.fn.getAssignedUVs(mesh.uv_set)
             faces = getattr(mesh, 'distortion_faces', None)
+            if guide_only:faces=[]
             if faces is None:
                 faces = []
                 iterator = om.MItMeshPolygon(mesh.path)
@@ -114,6 +119,7 @@ class LivePayload:
             self.entries.append((mesh, tuple(counts), tuple(ids),
                                  uv._mark_data(mesh), build_payload([indexed]) if indexed else [], faces))
             marked = {i for group in uv._marks(mesh) for i in group['ids']}
+            self.marked_ids.append(frozenset(marked))
             self.selected_ids.append(tuple(sorted(marked & mesh.explicit_selected)))
 
     def is_valid(self):
@@ -145,6 +151,12 @@ class LivePayload:
         self.selected_points = selected_points
         return result
 
+    def update_selection(self):
+        """Only the highlighted guide points change when components change."""
+        selected=explicit_uv_ids([entry[0] for entry in self.entries])
+        for n,(mesh,_,_,_,_,_) in enumerate(self.entries):
+            self.selected_ids[n]=tuple(sorted(self.marked_ids[n]&selected[mesh.name]))
+
     def distortion(self, color_range=2.):
         result = self.distortion_payloads(color_range, include_triangles=False)
         return None if result is None else result[0]
@@ -156,7 +168,7 @@ class LivePayload:
         for index, entry in enumerate(self.entries):
             mesh, counts, ids, marks, _, _ = entry
             fn = mesh.fn = om.MFnMesh(mesh.path)
-            if fn.currentUVSetName() != mesh.uv_set or uv_marks(mesh) != marks:
+            if fn.currentUVSetName() != mesh.uv_set:
                 return None
             current_counts, current_ids = fn.getAssignedUVs(mesh.uv_set)
             u, v = fn.getUVs(mesh.uv_set)
@@ -176,6 +188,11 @@ class LivePayload:
             if cached is not None and cached[0] == signature:
                 result = cached[1]
                 self.distortion_hits += 1
+            elif (cached is not None and not include_triangles and index in self.vector_geometry
+                  and cached[0][1:] == signature[1:]):
+                result = self.vector_geometry[index].recolor(cached[1], color_range)
+                self.distortion_cache[index] = (signature, result)
+                self.distortion_computes += 1
             else:
                 positions = self.reference_positions[index]
                 if positions is None:
@@ -241,7 +258,7 @@ class LivePayload:
         samples = []
         for mesh_index, (mesh, counts, ids, marks, _, faces) in entries:
             fn = mesh.fn
-            if fn.currentUVSetName() != mesh.uv_set or uv_marks(mesh) != marks:
+            if fn.currentUVSetName() != mesh.uv_set:
                 return None
             if coordinates is None:
                 current_counts, current_ids = fn.getAssignedUVs(mesh.uv_set)
@@ -297,7 +314,7 @@ class LivePayload:
                          key=lambda value: (round(abs(value), 10), -value))
             deviation = max(0., abs(signed)-dead_zone)
             strength = min(1., deviation/full_distortion*intensity)
-            neutral_rgb = (.48, .48, .48)
+            neutral_rgb = DISTORTION_NEUTRAL[:3]
             target = (.08, .32, 1.) if signed > 0 else (1., .08, .03)
             rgb = tuple(neutral_rgb[i]*(1-strength)+target[i]*strength for i in range(3))
             # Zero distortion is fully transparent so Maya's own standard UV
@@ -370,13 +387,13 @@ def selected_mesh_shapes(with_paths=False):
     return (result, paths) if with_paths else result
 
 
-def selected_guide_meshes(shapes):
+def selected_guide_meshes(shapes,cache=None):
     """Build guides only on marked meshes; avoid flattening the scene's UVs."""
     import uv_straight as uv
     meshes = []
     for shape in shapes:
         path = om.MSelectionList().add(shape).getDagPath(0)
-        mesh = uv.Mesh(path)
+        mesh = cache.get(path) if cache is not None else uv.Mesh(path)
         mesh.selected = set(mesh.points)
         meshes.append(mesh)
     selection = om.MGlobal.getActiveSelectionList()
@@ -403,7 +420,7 @@ class SceneDistortion:
                                    if geometry_reference is not None else {})
         self.meshes = {}
         self.shapes = ()
-        self.viewport_face_colors = []
+        self._viewport_face_colors = None
         self.face_colors_by_shape = {}
         self.distortion_computes = 0
         self.distortion_hits = 0
@@ -419,11 +436,21 @@ class SceneDistortion:
         self.cache_mesh_limit = max(1, int(cache_mesh_limit))
         self.cache_face_limit = max(1, int(cache_face_limit))
 
+    @property
+    def viewport_face_colors(self):
+        # Full snapshots are needed only by diagnostics or a display repair.
+        if self._viewport_face_colors is None:
+            self._viewport_face_colors = [item for shape in self.shapes
+                if shape in self.ready_shapes
+                for item in self.face_colors_by_shape.get(shape, ())]
+        return self._viewport_face_colors
+
     def update_scope(self, shapes=None):
         shapes = selected_mesh_shapes() if shapes is None else tuple(shapes)
         changed = shapes != self.shapes
         self.shapes = shapes
         if changed:
+            self._viewport_face_colors = None
             active = set(shapes)
             self.ready_shapes.intersection_update(active)
             self.pending_shapes = deque(shape for shape in self.pending_shapes if shape in active)
@@ -438,9 +465,10 @@ class SceneDistortion:
         self.pending_shapes.clear()
         self.pending_set.clear()
         self.processing = False
-        self.viewport_face_colors = []
+        self._viewport_face_colors = None
 
     def _drop(self, shape):
+        self._viewport_face_colors = None
         cached = self.meshes.pop(shape, None)
         self.uv_polygons.pop(shape, None)
         self.face_colors_by_shape.pop(shape, None)
@@ -470,7 +498,8 @@ class SceneDistortion:
         mesh = DistortionMesh(selection.getDagPath(0))
         return LivePayload([mesh], self.reference, self.geometry_reference)
 
-    def distortion_payloads(self, color_range, dirty_shapes=None, budget_ms=None):
+    def distortion_payloads(self, color_range, dirty_shapes=None, budget_ms=None,
+                            collect_payload=True):
         self.rebuilt = False
         self.rebuilt_shapes.clear()
         self.updated_shapes.clear()
@@ -507,10 +536,12 @@ class SceneDistortion:
                 self.distortion_hits += cached.distortion_hits - before_hits
                 if result is not None:
                     if computed or shape not in self.uv_polygons:
+                        self._viewport_face_colors = None
                         self.uv_polygons[shape] = result[0]
                         self.face_colors_by_shape[shape] = list(cached.viewport_face_colors)
                         self.updated_shapes.add(shape)
                     if shape not in self.ready_shapes:
+                        self._viewport_face_colors = None
                         self.updated_shapes.add(shape)
                         self.ready_shapes.add(shape)
                 # Moving the entry to the end keeps recently used meshes warm.
@@ -529,13 +560,10 @@ class SceneDistortion:
                 break
         self.processing = bool(self.pending_shapes)
         self._prune_cache()
-        polygons, face_colors = [], []
-        for shape in self.shapes:
-            if shape not in self.ready_shapes:
-                continue
-            polygons.extend(self.uv_polygons.get(shape, ()))
-            face_colors.extend(self.face_colors_by_shape.get(shape, ()))
-        self.viewport_face_colors = face_colors
+        if not collect_payload:
+            return None
+        polygons = [polygon for shape in self.shapes if shape in self.ready_shapes
+                    for polygon in self.uv_polygons.get(shape, ())]
         return polygons, []
 
     def selected_uv_payload(self):
@@ -707,8 +735,11 @@ class QtAnnotations(QtCore.QObject):
         self.selection_key = None
         self.scope_shapes = ()
         self.scope_paths = []
+        self.scope_watch = {}
         self.guide_presence = {}
         self.live_payload = None
+        self.guide_payload_source = None
+        self.pin_mesh_cache=PinMeshCache()
         self.coordinate_updates = 0
         self.distortion_enabled = (bool(cmds.optionVar(query='uvStraightDistortion'))
                                    if cmds.optionVar(exists='uvStraightDistortion') else False)
@@ -864,10 +895,21 @@ class QtAnnotations(QtCore.QObject):
             parent = cmds.listRelatives(shape, parent=True, fullPath=True) or []
             cmds.delete(parent or shape)
 
+    @property
+    def viewport_distortion_payload(self):
+        if self._viewport_distortion_payload is None:
+            return self.scene_distortion.viewport_face_colors
+        return self._viewport_distortion_payload
+
+    @viewport_distortion_payload.setter
+    def viewport_distortion_payload(self, value):
+        self._viewport_distortion_payload = value
+
     def _publish_viewport_distortion(self):
         desired = self.viewport_override_payload
         if desired is None and self.distortion_enabled:
-            desired = self.viewport_distortion_payload
+            desired = any(self.scene_distortion.face_colors_by_shape.get(shape)
+                          for shape in self.scene_distortion.ready_shapes)
         if QtWidgets.QApplication.mouseButtons() != QtCore.Qt.NoButton:
             self.viewport_color_pending = True
             self.viewport_publish_after = time.monotonic() + .016
@@ -881,6 +923,17 @@ class QtAnnotations(QtCore.QObject):
             return
         if self.viewport_recovery_pending:
             self._restore_viewport_colors()
+        if desired and self.viewport_override_owner == ORIGINAL_COLOR_OWNER:
+            if self.viewport_color_shapes:
+                self._restore_viewport_colors()
+            if not self.viewport_ready:
+                self._load_viewport_plugin()
+                self._ensure_viewport_helper()
+            self.live_viewport_preview.set_faces(desired)
+            self.force_viewport_color = False
+            self.viewport_color_pending = False
+            self.viewport_display_clock.restart()
+            return
         if desired is None:
             self.viewport_color_pending = False
             self._restore_viewport_colors()
@@ -913,6 +966,8 @@ class QtAnnotations(QtCore.QObject):
             return
         # Publish live values after the manipulator finishes. Writing mesh CPV
         # while dragging can force upstream evaluation and revert a UV edit.
+        if self.viewport_override_payload is None and self.distortion_enabled:
+            desired = self.viewport_distortion_payload
         fingerprint = tuple(desired)
         if check_display and display_ready:
             self.viewport_display_clock.restart()
@@ -986,6 +1041,7 @@ class QtAnnotations(QtCore.QObject):
         if not shapes:
             self.viewport_color_fingerprint = None
             return
+        show_finished = finished_visible()
         from uv_straight_native import _no_undo
         with _no_undo():
             for shape in sorted(shapes):
@@ -995,10 +1051,22 @@ class QtAnnotations(QtCore.QObject):
                     if not dependency.hasAttribute(attr):
                         continue
                     state = json.loads(dependency.findPlug(attr, False).asString())
+                    marked = dependency.hasAttribute('uvStraightDoneFillBackup')
+                    restore_hidden = (marked and not show_finished and
+                                      (state.get('current') or '').startswith('uvStraightDone_'))
                     sets = list(om.MFnMesh(path).getColorSetNames())
                     if state['set'] in sets:
                         cmds.polyColorSet(shape, delete=True, colorSet=state['set'])
                         sets.remove(state['set'])
+                    elif restore_hidden:
+                        # Maya Undo can leave the preview in the shape's color-set
+                        # plugs even when it is missing from the evaluated mesh.
+                        color_sets = shape + '.colorSet'
+                        for index in cmds.getAttr(color_sets, multiIndices=True) or []:
+                            slot = '{}[{}]'.format(color_sets, index)
+                            if cmds.getAttr(slot + '.colorName') == state['set']:
+                                cmds.removeMultiInstance(slot)
+                                break
                     if state.get('current') in sets:
                         cmds.polyColorSet(shape, currentColorSet=True,
                                           colorSet=state['current'])
@@ -1011,10 +1079,10 @@ class QtAnnotations(QtCore.QObject):
                         else:
                             plugs[name].setInt(value)
                     cmds.deleteAttr(shape + '.' + attr)
-                    if cmds.attributeQuery('uvStraightDoneFillBackup', node=shape, exists=True):
+                    if (marked and show_finished) or restore_hidden:
                         import uv_straight as uv
-                        uv._done_fill(shape, True)
-                    elif dependency.hasAttribute('uvStraightCheckerState'):
+                        uv._done_fill(shape, show_finished, keep_mark=True)
+                    if not (show_finished and marked) and dependency.hasAttribute('uvStraightCheckerState'):
                         plugs['displayColors'].setBool(False)
                 except (RuntimeError, ValueError, KeyError, TypeError):
                     pass
@@ -1027,12 +1095,22 @@ class QtAnnotations(QtCore.QObject):
 
     def _apply_viewport_colors(self, payload, replace=True):
         """Display preview colors through Maya's native mesh color sets."""
+        distortion = self.viewport_override_owner is None
         grouped = {}
         for shape, face, rgba in payload:
-            grouped.setdefault(shape, {})[int(face)] = tuple(float(v) for v in rgba)
-        missing = self.viewport_color_shapes.difference(grouped) if replace else set()
+            # Maya converts components to floats once when building MColorArray.
+            grouped.setdefault(shape, {})[int(face)] = tuple(rgba)
+        neutral = set()
+        if distortion:
+            neutral = {shape for shape, faces in grouped.items()
+                       if all(color == DISTORTION_NEUTRAL for color in faces.values())}
+            for shape in neutral:
+                del grouped[shape]
+        missing = (self.viewport_color_shapes.difference(grouped) if replace else
+                   self.viewport_color_shapes.intersection(neutral))
         if missing:
             self._restore_viewport_colors(missing)
+        show_finished = bool(grouped) and distortion and finished_visible()
         attr = 'uvStraightViewportPreviewState'
         from uv_straight_native import _no_undo
         with _no_undo():
@@ -1043,8 +1121,10 @@ class QtAnnotations(QtCore.QObject):
                     dependency = om.MFnDependencyNode(path.node())
                 except (RuntimeError, ValueError):
                     continue
-                if (self.viewport_override_owner is None and
-                        dependency.hasAttribute('uvStraightDoneFillBackup')):
+                if distortion and len(faces) < fn.numPolygons:
+                    # Unmapped faces must also preserve their base material.
+                    faces = {**dict.fromkeys(range(fn.numPolygons), DISTORTION_NEUTRAL), **faces}
+                if show_finished and dependency.hasAttribute('uvStraightDoneFillBackup'):
                     faces = {face: completion_tint(rgba) for face, rgba in faces.items()}
                 if (not self.force_viewport_color and
                         self.viewport_face_cache.get(shape) == faces):
@@ -1065,32 +1145,26 @@ class QtAnnotations(QtCore.QObject):
                 if state['set'] not in sets:
                     cmds.polyColorSet(shape, create=True, colorSet=state['set'],
                                       representation='RGBA')
-                cmds.polyColorSet(shape, currentColorSet=True, colorSet=state['set'])
+                if fn.currentColorSetName() != state['set']:
+                    cmds.polyColorSet(shape, currentColorSet=True, colorSet=state['set'])
                 if write_colors:
-                    selection = om.MSelectionList()
-                    selection.add(shape)
-                    fn = om.MFnMesh(selection.getDagPath(0))
-                    colors, face_ids = om.MColorArray(), om.MIntArray()
+                    # Refresh the function set after native color-set commands,
+                    # reusing the already validated DAG path.
+                    fn = om.MFnMesh(path)
                     previous = (self.viewport_face_cache.get(shape, {})
                                 if state['set'] in sets else {})
-                    changed_faces = {face: rgba for face, rgba in faces.items()
-                                     if previous.get(face) != rgba}
-                    for face in sorted(changed_faces):
-                        if face < 0 or face >= fn.numPolygons:
-                            continue
-                        rgba = changed_faces[face]
-                        colors.append(om.MColor(rgba))
-                        face_ids.append(face)
-                    if colors:
-                        fn.setFaceColors(colors, face_ids)
+                    polygon_count = fn.numPolygons
+                    changed_ids = sorted(face for face, rgba in faces.items()
+                                         if previous.get(face) != rgba and
+                                         0 <= face < polygon_count)
+                    if changed_ids:
+                        colors = om.MColorArray([faces[face] for face in changed_ids])
+                        fn.setFaceColors(colors, om.MIntArray(changed_ids))
                     self.viewport_face_cache[shape] = dict(faces)
                 plugs['displayColors'].setBool(True)
-                # Modulate2X keeps the UV checker visible below distortion:
-                # a neutral .5 CPV leaves the material unchanged while red or
-                # blue CPV tints it. Explicit overlays such as Texel Density
-                # continue to replace the material with their exact colors.
-                checker = dependency.hasAttribute('uvStraightCheckerState')
-                blend = 6 if checker and self.viewport_override_owner is None else 0
+                # Modulate2X makes neutral .5 invisible over the assigned
+                # material or checker. Diagnostic overrides still use Overwrite.
+                blend = 6 if distortion else 0
                 plugs['materialBlend'].setInt(blend)
                 self.viewport_display[shape] = (state['set'], blend)
                 plugs['displayColorChannel'].setString('Diffuse')
@@ -1103,6 +1177,7 @@ class QtAnnotations(QtCore.QObject):
             self.viewport_color_shapes.update(grouped)
 
     def set_viewport_override(self, payload, owner):
+        if owner!='uv_groups':self.group_uv_payload=None
         self.live_viewport_preview.clear()
         self.viewport_override_payload = list(payload)
         self.viewport_override_owner = str(owner)
@@ -1112,8 +1187,14 @@ class QtAnnotations(QtCore.QObject):
     def clear_viewport_override(self, owner=None):
         if owner is not None and owner != self.viewport_override_owner:
             return
+        release_helper = (self.viewport_override_owner == ORIGINAL_COLOR_OWNER and
+                          not self.distortion_enabled and not self.scene_suspended and
+                          QtWidgets.QApplication.mouseButtons() == QtCore.Qt.NoButton)
         self.viewport_override_payload = None
         self.viewport_override_owner = None
+        if release_helper:
+            self._remove_viewport_helper()
+            self.viewport_ready = False
         self.force_viewport_color = True
         self._safe_publish_viewport()
 
@@ -1156,7 +1237,7 @@ class QtAnnotations(QtCore.QObject):
                 roots = {item.split('.', 1)[0] for item in
                          (cmds.ls(members, long=True) or [])} if members else set()
                 allowed = set()
-                for shape in self.scope_shapes:
+                for shape in set(self.scope_shapes) | self.live_viewport_preview.face_paths.keys():
                     owner = shape
                     while owner:
                         if owner in roots:
@@ -1168,10 +1249,12 @@ class QtAnnotations(QtCore.QObject):
                     from uv_straight_native import _no_undo
                     with _no_undo():
                         cmds.sets(self.viewport_helper, add=group)
-        self.live_viewport_preview.panel_shapes = isolated
+        self.live_viewport_preview.set_panel_shapes(isolated)
 
     def _safe_publish_viewport(self):
         # A VP2 failure must not erase the independent UV-editor overlay.
+        if self.changes.previewing:
+            return  # Loading the provider can pump Qt timers in Maya 2025.
         self.changes.previewing = True
         try:
             self._publish_viewport_distortion()
@@ -1426,7 +1509,7 @@ class QtAnnotations(QtCore.QObject):
             self.changes.invalidate()  # Discover the first newly assigned guide.
         started = time.perf_counter()
         self.refresh()
-        if self.viewport_display_clock.elapsed() >= 1000:
+        if self.viewport_override_owner == ORIGINAL_COLOR_OWNER or self.viewport_display_clock.elapsed() >= 1000:
             self._safe_publish_viewport()
         # Keep idle polling sparse; UV drags and explicit ShellShifter actions
         # schedule their own live refreshes.
@@ -1469,17 +1552,23 @@ class QtAnnotations(QtCore.QObject):
             # Cheap fallback for selection changes missed by Maya callbacks.
             # Do not flatten components or walk mesh topology while idle.
             selection_key = tuple(cmds.ls(selection=True, long=True) or [])
-            if selection_key != self.selection_key:
+            selection_changed = selection_key != self.selection_key
+            if selection_changed:
                 self.selection_key = selection_key
-                self.live_payload = None
                 self.changes.selection_changed()
-                self.payload = []
-                self.selected_pin_points = []
+            # Pin inference belongs to PickerSession.pick(), where the selected
+            # meshes are already needed. Eager inference here built full edge
+            # topology for every selected UV owner just to display distortion.
             if self.changes.dirty or (self.distortion_pending and
                                       self.distortion_clock.elapsed() >= self.distortion_interval):
                 if self.changes.scope_dirty:
                     self.scope_shapes, self.scope_paths = selected_mesh_shapes(with_paths=True) if (
                         self.distortion_enabled or self.pins_enabled or self.picker_active) else ((), [])
+                    self.scope_watch = {}
+                    for path, visible in self.scope_paths:
+                        if visible:
+                            name = path.fullPathName()
+                            self.scope_watch[name] = SimpleNamespace(path=path, name=name)
                 selected_shapes = self.scope_shapes
                 selected_shape_set = set(selected_shapes)
                 if self.pins_enabled or self.picker_active:
@@ -1488,22 +1577,37 @@ class QtAnnotations(QtCore.QObject):
                                     self.changes.dirty_shapes))
                     for shape in check_marks:
                         if shape in selected_shape_set:
-                            self.guide_presence[shape] = cmds.attributeQuery(uv.MARK_ATTR, node=shape, exists=True)
+                            path = self.scope_watch[shape].path
+                            self.guide_presence[shape] = om.MFnDependencyNode(path.node()).hasAttribute(uv.MARK_ATTR)
                     self.guide_presence = {shape: self.guide_presence.get(shape, False) for shape in selected_shapes}
                 guide_shapes = [shape for shape in selected_shapes if self.guide_presence.get(shape)]
-                needs_guides = (self.pins_enabled or self.picker_active) and bool(guide_shapes)
+                # Guide segments are consumed only by UV-editor layers. Keep
+                # 3D-only distortion independent of full pin/edge topology;
+                # opening an editor invalidates the scope and builds it then.
+                needs_guides = bool(editors) and (self.pins_enabled or self.picker_active) and bool(guide_shapes)
+                if self.live_payload is not None and tuple(e[0].name for e in self.live_payload.entries)!=tuple(guide_shapes if needs_guides else ()):
+                    self.live_payload=None
                 if needs_guides and self.live_payload is not None and not self.live_payload.entries:
                     self.live_payload = None
-                current = self.live_payload.read() if self.live_payload is not None else None
+                if self.live_payload is not None and self.live_payload.entries and selection_changed:
+                    self.live_payload.update_selection()
+                # Distortion drains its mesh queue in bounded slices. Unchanged
+                # guide UVs need not be reread for every slice of that queue.
+                read_guides = (selection_changed or self.changes.all_dirty or
+                               bool(self.changes.dirty_shapes.intersection(guide_shapes)) or
+                               self.guide_payload_source is not self.live_payload)
+                current = (self.live_payload.read() if read_guides else self.payload
+                           ) if self.live_payload is not None else None
                 if current is None:
                     try:
-                        meshes = selected_guide_meshes(guide_shapes) if needs_guides else []
+                        meshes = selected_guide_meshes(guide_shapes,self.pin_mesh_cache) if needs_guides else []
                     except (ValueError, RuntimeError):
                         meshes = []
                     self.marked_groups = sum(len(uv._marks(mesh)) for mesh in meshes)
-                    self.live_payload = LivePayload(meshes, self.distortion_reference)
+                    self.live_payload = LivePayload(meshes,self.distortion_reference,guide_only=True)
                     current = self.live_payload.read()
                     self.payload_builds += 1
+                if current is not None:self.guide_payload_source=self.live_payload
                 self.payload = (current or []) if self.pins_enabled else []
                 self.selected_pin_points = (list(self.live_payload.selected_points)
                                             if self.pins_enabled and current is not None else [])
@@ -1526,7 +1630,8 @@ class QtAnnotations(QtCore.QObject):
                                     set(self.distortion_invalid_shapes))
                     self.scene_distortion.distortion_payloads(
                         self.distortion_range, dirty_shapes,
-                        budget_ms=6 if len(selected_shapes) > 16 else None)
+                        budget_ms=12 if len(selected_shapes) > 16 else None,
+                        collect_payload=False)
                     self.viewport_dirty_shapes.update(self.scene_distortion.updated_shapes)
                     self.distortion_all_dirty = False
                     self.distortion_invalid_shapes.clear()
@@ -1534,8 +1639,7 @@ class QtAnnotations(QtCore.QObject):
                         for shape in self.scene_distortion.rebuilt_shapes:
                             self.viewport_face_cache.pop(shape, None)
                     self.distortion_last_ms = (time.perf_counter()-started)*1000.
-                    self.viewport_distortion_payload = list(
-                        self.scene_distortion.viewport_face_colors)
+                    self.viewport_distortion_payload = None
                     self.distortion_clock.restart()
                     # A slow initial build must not delay later cheap UV edits
                     # by 3x its duration (up to one second). Queue work already
@@ -1551,13 +1655,12 @@ class QtAnnotations(QtCore.QObject):
                     self.distortion_payload = self.scene_distortion.selected_uv_payload() if editors else []
                 watched = {entry[0].name: entry[0] for entry in self.live_payload.entries}
                 if self.pins_enabled or self.picker_active:
-                    watched.update({path.fullPathName(): SimpleNamespace(path=path, name=path.fullPathName())
-                                    for path, visible in self.scope_paths if visible})
+                    watched.update(self.scope_watch)
                 if self.distortion_enabled:
                     watched.update({shape: cached.entries[0][0] for shape, cached in
                                     self.scene_distortion.meshes.items()
                                     if shape in self.scene_distortion.ready_shapes})
-                self.changes.watch(list(watched.values()))
+                self.changes.watch(watched)
                 self.changes.clean()
                 self.coordinate_updates += 1
                 self._safe_publish_viewport()
@@ -1569,16 +1672,18 @@ class QtAnnotations(QtCore.QObject):
                 try:
                     layer = self.editors.get(editor)
                     combined_payload = self.payload + self.check_uv_payload
-                    if layer is None and (combined_payload or self.distortion_payload or
+                    group_colors=getattr(self,'group_uv_payload',None)
+                    surface_colors=self.distortion_payload if group_colors is None else group_colors
+                    if layer is None and (combined_payload or surface_colors or
                                           self.picker_active):
                         layer = self._attach(editor)
                     if layer is not None:
                         layer.set_payload(combined_payload)
                         layer.set_selected_points(self.selected_pin_points)
-                        layer.set_distortion(self.distortion_payload, groups=(
+                        layer.set_distortion(surface_colors, groups=(
                             getattr(self.scene_distortion, 'selected_uv_groups', {})
-                            if self.distortion_enabled else {}))
-                        if not (combined_payload or self.distortion_payload or
+                            if group_colors is None and self.distortion_enabled else None if group_colors is not None else {}))
+                        if not (combined_payload or surface_colors or
                                 self.picker_active):
                             self._remove(editor)
                 except (RuntimeError, ValueError) as error:
@@ -1641,6 +1746,16 @@ class QtAnnotations(QtCore.QObject):
         self.view_dirty = False
 
     def set_distortion(self, enabled, color_range=None):
+        if self.distortion_enabled and enabled and color_range is not None:
+            value = max(.01, float(color_range))
+            if value != self.distortion_range:
+                self.distortion_range = value
+                cmds.optionVar(floatValue=('uvStraightDistortionRange', value))
+                self.force_distortion = True
+                self.distortion_all_dirty = True
+                self.changes.dirty = True
+                self.refresh()
+            return
         was_enabled = self.distortion_enabled
         self.distortion_enabled = bool(enabled)
         self.uv_dragging = False
@@ -1824,6 +1939,8 @@ class QtAnnotations(QtCore.QObject):
 
     def shutdown(self):
         self.stopped = True
+        self.guide_payload_source = None
+        self.pin_mesh_cache.clear()
         self.live_viewport_preview.clear()
         self.timer.stop()
         self.view_timer.stop()

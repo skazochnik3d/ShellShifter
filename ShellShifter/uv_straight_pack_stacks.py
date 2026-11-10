@@ -1,8 +1,109 @@
-"""Identify existing coincident UV outlines; no Maya or Qt access."""
+"""Identify existing UV overlaps and coincident outlines; no Maya or Qt access."""
 from collections import Counter, defaultdict
 from itertools import product
 import math
 import numpy as np
+
+
+def overlap_groups(surfaces, progress=None):
+    """Connected components of positive-area overlaps, in absolute UV space.
+
+    Broad phases use shell bounds and lazy triangle trees. The final separating
+    axis test uses actual triangles, so touching borders and holes stay separate.
+    There is no pixel grid, tile restriction, or topology/outline requirement.
+    """
+    triangles=[];bounds=[];trees={};parents=list(range(len(surfaces)))
+    signatures={};representatives=[];overlap_cache={}
+    for surface_index, surface in enumerate(surfaces):
+        if progress: progress('Reading UV stacks...', surface_index, len(surfaces))
+        points=np.asarray(surface,dtype=np.float64).reshape(-1,3,2)
+        if not np.isfinite(points).all():raise ValueError('Invalid UV overlap coordinates.')
+        if len(points):
+            a,b=points[:,1]-points[:,0],points[:,2]-points[:,0]
+            points=points[np.abs(a[:,0]*b[:,1]-a[:,1]*b[:,0])>0.]
+        triangles.append(points)
+        signature=(points.shape,points.tobytes())
+        representatives.append(signatures.setdefault(signature,surface_index))
+        bounds.append((points.min(axis=(0,1)),points.max(axis=(0,1))) if len(points) else None)
+
+    def root(i):
+        while parents[i]!=i:
+            parents[i]=parents[parents[i]];i=parents[i]
+        return i
+
+    def tree(points):
+        low=points.min(axis=(0,1));high=points.max(axis=(0,1))
+        if len(points)<=8:return low,high,points,None
+        axis=int(np.argmax(high-low));order=np.argsort(points[:,:,axis].mean(axis=1),kind='stable')
+        middle=len(order)//2
+        return low,high,tree(points[order[:middle]]),tree(points[order[middle:]])
+
+    def bounds_overlap(a,b):
+        # Tiny two-coordinate arrays cost more to dispatch than these scalar tests.
+        return (min(a[1][0],b[1][0])>max(a[0][0],b[0][0]) and
+                min(a[1][1],b[1][1])>max(a[0][1],b[0][1]))
+
+    def intersects(a,b):
+        # At most 64 triangle pairs per leaf. Work near their common origin to
+        # retain precision for UVs in distant UDIMs, without rounding vertices.
+        origin=np.minimum(a.min(axis=(0,1)),b.min(axis=(0,1)))
+        a=a-origin;b=b-origin
+        first=np.repeat(a,len(b),axis=0);second=np.tile(b,(len(a),1,1))
+        edges=np.concatenate((np.roll(first,-1,axis=1)-first,np.roll(second,-1,axis=1)-second),axis=1)
+        axes=np.stack((-edges[:,:,1],edges[:,:,0]),axis=-1)
+        pa=np.einsum('pvc,pac->pav',first,axes);pb=np.einsum('pvc,pac->pav',second,axes)
+        overlap=np.minimum(pa.max(axis=2),pb.max(axis=2))-np.maximum(pa.min(axis=2),pb.min(axis=2))
+        tolerance=np.finfo(np.float64).eps*32*np.maximum(np.abs(pa).max(axis=2),np.abs(pb).max(axis=2))
+        return bool(np.any(np.all(overlap>tolerance,axis=1)))
+
+    def calculate_overlap(i,j):
+        for index in (i,j):
+            if index not in trees:trees[index]=tree(triangles[index])
+        pending=[(trees[i],trees[j])]
+        steps=0
+        while pending:
+            steps+=1
+            if progress and steps % 64 == 0: progress('Checking UV stacks...')
+            a,b=pending.pop()
+            if not bounds_overlap(a,b):continue
+            if a[3] is None and b[3] is None:
+                if intersects(a[2],b[2]):return True
+            elif b[3] is None or (a[3] is not None and np.prod(a[1]-a[0])>=np.prod(b[1]-b[0])):
+                pending.extend(((a[2],b),(a[3],b)))
+            else:pending.extend(((a,b[2]),(a,b[3])))
+        return False
+
+    def surfaces_overlap(i,j):
+        # Exactly equal arrays share the same BVH and the same SAT result.
+        # No coordinate rounding or approximate shape matching is involved.
+        i,j=representatives[i],representatives[j]
+        key=(min(i,j),max(i,j))
+        if key not in overlap_cache:
+            result=calculate_overlap(i,j)
+            if len(overlap_cache)>=65536:overlap_cache.clear()
+            overlap_cache[key]=result
+        return overlap_cache[key]
+
+    active=[]
+    low=np.asarray([b[0] if b is not None else (0.,0.) for b in bounds],dtype=np.float64).reshape(-1,2)
+    high=np.asarray([b[1] if b is not None else (0.,0.) for b in bounds],dtype=np.float64).reshape(-1,2)
+    for position, i in enumerate(sorted((i for i,b in enumerate(bounds) if b is not None),key=lambda i:(low[i,0],i))):
+        if progress: progress('Checking UV stacks...', position, len(surfaces))
+        if active:
+            ids=np.asarray(active,dtype=np.intp)
+            ids=ids[high[ids,0]>low[i,0]]
+            active=ids.tolist()
+            # Preserve sweep order and strict boundary comparisons. Only the
+            # broad phase is batched; all candidates retain the same triangle SAT.
+            candidates=ids[(high[ids,1]>low[i,1]) & (low[ids,1]<high[i,1])]
+            for candidate,j in enumerate(candidates.tolist()):
+                if progress and candidate % 64 == 0: progress('Checking UV stacks...', position, len(surfaces))
+                if root(i)!=root(j) and surfaces_overlap(i,j):
+                    parents[root(i)]=root(j)
+        active.append(i)
+    result=defaultdict(list)
+    for i in range(len(surfaces)):result[root(i)].append(i)
+    return sorted(result.values(),key=lambda group:group[0])
 
 
 def _outline_edges(edges, points):

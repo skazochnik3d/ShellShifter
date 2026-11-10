@@ -1,4 +1,4 @@
-"""Two-column material buttons, cooperative scene reads and quick UV selection."""
+"""Compact material picker, cooperative scene reads and quick UV selection."""
 import sys
 import time
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -6,97 +6,7 @@ import maya.api.OpenMaya as om
 import maya.cmds as cmds
 from uv_straight_materials import scan, select
 from uv_straight_material_groups import sort_key
-
-CELL_HEIGHT = 38
-
-
-class MaterialDelegate(QtWidgets.QStyledItemDelegate):
-    def sizeHint(self, option, index):
-        return QtCore.QSize(120, CELL_HEIGHT)
-
-    def paint(self, painter, option, index):
-        # Maya 2027 paints its square selection under the custom delegate.
-        # Cover that cell before drawing the same rounded button as Maya 2025.
-        painter.fillRect(option.rect, QtGui.QColor('#383838'))
-        if index.data(QtCore.Qt.UserRole) is None:
-            return
-        painter.save()
-        painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        rect = QtCore.QRectF(option.rect).adjusted(3.5, 3.5, -3.5, -3.5)
-        view = self.parent()
-        selection = view.selectionModel() if isinstance(view, QtWidgets.QAbstractItemView) else None
-        selected = (selection.isSelected(index) if selection is not None else
-                    bool(option.state & QtWidgets.QStyle.State_Selected))
-        hovered = bool(option.state & QtWidgets.QStyle.State_MouseOver)
-        enabled = bool(option.state & QtWidgets.QStyle.State_Enabled)
-        painter.setBrush(QtGui.QColor('#575d63' if selected else '#505050' if hovered else '#484848'))
-        painter.setPen(QtGui.QPen(QtGui.QColor('#8c9297'), 1) if selected else QtCore.Qt.NoPen)
-        painter.drawRoundedRect(rect, 7, 7)
-        painter.setFont(option.font)
-        painter.setPen(QtGui.QColor('#eeeeee' if enabled else '#888888'))
-        text_rect = rect.adjusted(9, 0, -9, 0)
-        title = QtGui.QFontMetrics(option.font).elidedText(
-            str(index.data(QtCore.Qt.DisplayRole)), QtCore.Qt.ElideRight, max(0, int(text_rect.width())))
-        painter.drawText(text_rect, QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft, title)
-        painter.restore()
-
-
-class MaterialGrid(QtWidgets.QTableWidget):
-    """Equal-width columns with selection ranges following the reading order."""
-    keyboard_selected = QtCore.Signal()
-
-    def __init__(self):
-        super().__init__(0, 2)
-        self.anchor = None
-        self.horizontalHeader().hide()
-        self.verticalHeader().hide()
-        self.horizontalHeader().setMinimumSectionSize(0)
-        self.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
-        self.verticalHeader().setDefaultSectionSize(CELL_HEIGHT)
-        self.verticalHeader().setMinimumSectionSize(CELL_HEIGHT)
-        self.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Fixed)
-        self.setShowGrid(False)
-        self.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectItems)
-        self.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.setDragDropMode(QtWidgets.QAbstractItemView.NoDragDrop)
-
-    def mousePressEvent(self, event):
-        item = self.itemAt(event.position().toPoint())
-        if event.button() != QtCore.Qt.LeftButton or item is None or item.data(QtCore.Qt.UserRole) is None:
-            super().mousePressEvent(event)
-            return
-        index = self.row(item)*2+self.column(item)
-        modifiers = event.modifiers()
-        toggle = bool(modifiers & (QtCore.Qt.ControlModifier | QtCore.Qt.MetaModifier))
-        previous = tuple(self.selectedItems())
-        was_selected = item.isSelected()
-        # Let Qt finish its normal press/release path before Maya selection is queued.
-        super().mousePressEvent(event)
-        self.clearSelection()
-        if toggle:
-            for current in previous:
-                current.setSelected(True)
-        if modifiers & QtCore.Qt.ShiftModifier:
-            first = self.anchor if self.anchor is not None else index
-            for position in range(min(first, index), max(first, index)+1):
-                current = self.item(position//2, position%2)
-                if current is not None and current.data(QtCore.Qt.UserRole) is not None:
-                    current.setSelected(True)
-        else:
-            item.setSelected(not was_selected if toggle else True)
-            self.anchor = index
-
-    def keyPressEvent(self, event):
-        super().keyPressEvent(event)
-        if event.key() in (QtCore.Qt.Key_Left, QtCore.Qt.Key_Right, QtCore.Qt.Key_Up,
-                           QtCore.Qt.Key_Down, QtCore.Qt.Key_Home, QtCore.Qt.Key_End,
-                           QtCore.Qt.Key_PageUp, QtCore.Qt.Key_PageDown, QtCore.Qt.Key_Space,
-                           QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
-            item = self.currentItem()
-            if item is not None:
-                self.anchor = self.row(item)*2+self.column(item)
-            self.keyboard_selected.emit()
-
+from uv_straight_icons import icon
 
 class MaterialController(QtCore.QObject):
     def __init__(self, window, layout):
@@ -123,42 +33,65 @@ class MaterialController(QtCore.QObject):
         body = QtWidgets.QVBoxLayout(self.view)
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(6)
+        section = window.sections['materials']
+        outer = section.layout()
+        header_row = outer.takeAt(0).layout()
+        header_row.setParent(None)
+        outer.removeWidget(section.body)
+        card = QtWidgets.QFrame(section)
+        card.setObjectName('materialsCard')
+        section.setStyleSheet(
+            'QFrame#section_materials { background: transparent; border: 0; }'
+            'QFrame#materialsCard { background: #363636; border: 0; border-radius: 12px; }')
+        font = QtGui.QFont('Segoe UI')
+        font.setPixelSize(12)
+        section.setFont(font)
+        card_layout = QtWidgets.QVBoxLayout(card)
+        card_layout.setContentsMargins(0, 8, 0, 0)
+        card_layout.setSpacing(0)
+        card_layout.addLayout(header_row)
+        card_layout.addWidget(section.body)
+        outer.setSpacing(5)
+        outer.addWidget(card)
+        layout.setContentsMargins(8, 3, 8, 8)
+        header_row.setContentsMargins(56, 0, 8, 0)
+        header_row.setSpacing(0)
+        section.header.setFixedHeight(24)
+        section.header.setStyleSheet('QToolButton#categoryHeader { text-align: center; padding: 0; color: #f0f0f0; }')
+        section.pin.setIconSize(QtCore.QSize(14, 14))
+        def set_pin_icon(pinned):
+            section.pin.setIcon(icon('material_pinned' if pinned else 'material_pin'))
+        set_pin_icon(section.pin.isChecked())
+        section.pin.toggled.connect(set_pin_icon)
         self.refresh_button = QtWidgets.QToolButton()
         self.refresh_button.setObjectName('materialRefresh')
-        refresh_pixmap = QtGui.QPixmap(32, 32)
-        refresh_pixmap.fill(QtCore.Qt.transparent)
-        painter = QtGui.QPainter(refresh_pixmap)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        pen = QtGui.QPen(QtGui.QColor('#dedede'), 2.)
-        pen.setCapStyle(QtCore.Qt.RoundCap)
-        pen.setJoinStyle(QtCore.Qt.RoundJoin)
-        painter.setPen(pen)
-        painter.drawArc(QtCore.QRectF(6, 6, 20, 20), 35 * 16, 290 * 16)
-        painter.drawPolyline(QtGui.QPolygonF([QtCore.QPointF(24, 5),
-            QtCore.QPointF(25, 12), QtCore.QPointF(18, 11)]))
-        painter.end()
-        self.refresh_button.setIcon(QtGui.QIcon(refresh_pixmap))
-        self.refresh_button.setIconSize(QtCore.QSize(18, 18))
+        self.refresh_button.setIcon(icon('material_refresh'))
+        self.refresh_button.setIconSize(QtCore.QSize(14, 14))
         self.refresh_button.setFixedSize(24, 24)
         self.refresh_button.setToolTip('Refresh assigned materials')
         self.refresh_button.setAccessibleName('Refresh assigned materials')
         self.refresh_button.clicked.connect(self.refresh)
-        section = window.sections['materials']
-        header_row = section.layout().itemAt(0).layout()
         header_row.insertWidget(header_row.indexOf(section.pin), self.refresh_button)
-        self.refresh_button.setStyleSheet('QToolButton { padding: 0; border-radius: 10px; } '
+        self.refresh_button.setStyleSheet('QToolButton { padding: 0; border-radius: 5px; } '
                                          'QToolButton:hover { background: #525252; }')
-        self.list = MaterialGrid()
-        self.list.setObjectName('materialRows')
-        self.list.setMouseTracking(True)
-        self.list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        self.list.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self.list.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
-        self.list.setItemDelegate(MaterialDelegate(self.list))
-        self.list.setFixedHeight(CELL_HEIGHT)
-        self.list.setToolTip('Click to select the material’s UVs. Ctrl adds materials; Shift selects a range. Uses each object’s current UV set.')
-        self.list.itemClicked.connect(self.queue_selection)
-        self.list.keyboard_selected.connect(self.queue_selection)
+        self.list = QtWidgets.QComboBox()
+        self.list.setObjectName('materialPicker')
+        self.list.setMinimumWidth(0)
+        self.list.setFixedHeight(29)
+        self.list.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.list.setMinimumContentsLength(1)
+        self.list.setMaxVisibleItems(16)
+        self.list.setPlaceholderText('Select material…')
+        self.list.setAccessibleName('Assigned materials')
+        self.list.setToolTip("Choose a material to select its UVs and view its textures.")
+        self.list.setStyleSheet(
+            'QComboBox {background:#292929;color:#f0f0f0;border:1px solid #5b5b5b;'
+            'border-radius:5px;padding:0 8px;min-height:27px;max-height:27px;}'
+            'QComboBox::drop-down {border:0;width:24px;}'
+            'QComboBox QAbstractItemView {background:#292929;color:#eeeeee;'
+            'border:1px solid #666666;selection-background-color:#cfe1dc;selection-color:#17292b;}')
+        self.drop_viewport = self.list
+        self.list.activated.connect(self.queue_selection)
         body.addWidget(self.list)
         self.empty = QtWidgets.QLabel('No materials with UVs found.')
         self.empty.setWordWrap(True)
@@ -181,8 +114,26 @@ class MaterialController(QtCore.QObject):
         self.poll = QtCore.QTimer(self)
         self.poll.setInterval(150)
         self.poll.timeout.connect(self.check_dirty)
+        self.resize_timer=QtCore.QTimer(self)
+        self.resize_timer.setSingleShot(True)
+        self.resize_timer.setInterval(16)
+        self.resize_timer.timeout.connect(lambda:self.window.adjust_popup_size() if hasattr(self.window,'adjust_popup_size') else None)
+        from uv_straight_material_texture_ui import TexturePanel
+        self.textures=TexturePanel(self,body,outer)
+        # Catch external files on the material buttons and the empty panel too.
+        self.view.setAcceptDrops(True)
+        self.drop_viewport.setAcceptDrops(True)
+        self.drop_viewport.installEventFilter(self)
 
     def eventFilter(self, watched, event):
+        if watched is self.view or watched is self.drop_viewport:
+            if event.type() in (QtCore.QEvent.DragEnter,QtCore.QEvent.DragMove,QtCore.QEvent.Drop):
+                from uv_straight_texture_import_ui import mime_paths
+                paths=mime_paths(event.mimeData())
+                if paths:
+                    if event.type()==QtCore.QEvent.Drop:self.textures.queue_import(paths)
+                    event.acceptProposedAction();return True
+                event.ignore();return True
         if watched is self.view:
             if event.type() == QtCore.QEvent.Show:
                 self.activate()
@@ -199,6 +150,7 @@ class MaterialController(QtCore.QObject):
         # DG and scene callbacks only mark stale data. All Maya reads happen
         # later on the GUI thread, outside the triggering Maya operation.
         self.dirty = True
+        self.textures.invalidate()
 
     def activate(self):
         if self.stopped or self.active:
@@ -236,9 +188,11 @@ class MaterialController(QtCore.QObject):
         self.active = False
         self.dirty = True
         self.poll.stop()
+        self.resize_timer.stop()
         self.cancel_scan()
         self.remove_callbacks(self.callbacks)
         self.remove_callbacks(self.rename_callbacks)
+        self.textures.pause()
 
     def stop(self, *unused):
         self.stopped = True
@@ -251,11 +205,15 @@ class MaterialController(QtCore.QObject):
     def check_dirty(self):
         if self.dirty and self.steps is None:
             self.refresh()
+        elif self.active and not self.scene_busy():
+            self.textures.check_dirty()
 
     def scene_busy(self):
         packing = sys.modules.get('uv_straight_pack_progress')
         native = sys.modules.get('uv_straight_native')
+        transfer = sys.modules.get('uv_straight_transfer_ui')
         return bool((packing is not None and packing.is_running()) or
+                    (transfer is not None and transfer.is_running()) or
                     (native is not None and native.uv_edit_busy()))
 
     def refresh(self, *unused):
@@ -296,24 +254,17 @@ class MaterialController(QtCore.QObject):
         self.timer.start(1)
 
     def replace_records(self, records):
-        selected = {item.data(QtCore.Qt.UserRole).uuid for item in self.list.selectedItems()
-                    if item.data(QtCore.Qt.UserRole) is not None}
+        current = self.list.currentData()
+        selected = current.uuid if current is not None else None
         self.records = records = tuple(sorted(records, key=lambda record: (sort_key(record.name), record.uuid)))
         with QtCore.QSignalBlocker(self.list):
-            self.list.clearContents()
-            self.list.setRowCount((len(records)+1)//2)
-            self.list.anchor = None
-            for index, record in enumerate(records):
-                item = QtWidgets.QTableWidgetItem(record.name)
-                self.list.setItem(index//2, index%2, item)
-                item.setData(QtCore.Qt.UserRole, record)
-                item.setToolTip('{}\n{} objects · UV sets: {}\nClick to select UVs; Ctrl/Shift for multiple materials.'.format(
-                    record.name, record.objects, ', '.join(record.uv_sets)))
-                item.setSelected(record.uuid in selected)
-            if len(records)%2:
-                empty = QtWidgets.QTableWidgetItem()
-                empty.setFlags(QtCore.Qt.NoItemFlags)
-                self.list.setItem(len(records)//2, 1, empty)
+            self.list.clear()
+            for record in records:
+                self.list.addItem(record.name, record)
+                self.list.setItemData(self.list.count()-1,
+                    '{}\nObjects: {} · UV sets: {}'.format(record.name, record.objects, ', '.join(record.uv_sets)),
+                    QtCore.Qt.ToolTipRole)
+            self.list.setCurrentIndex(next((i for i, record in enumerate(records) if record.uuid == selected), -1))
         self.list.setEnabled(True)
         self.refresh_button.setEnabled(True)
         self.resize_list()
@@ -329,26 +280,24 @@ class MaterialController(QtCore.QObject):
         self.status.setText('{} material{}'.format(len(records), '' if len(records) == 1 else 's'))
         self.status.hide()
         self.adjust_size()
-
-    def material_items(self):
-        return tuple(self.list.item(index//2, index%2) for index in range(len(self.records)))
+        self.update_textures()
 
     def resize_list(self):
-        rows = self.list.rowCount()
-        self.list.setFixedHeight(min(280, max(CELL_HEIGHT, rows*CELL_HEIGHT)))
         self.adjust_size()
 
     def adjust_size(self):
         if hasattr(self.window, 'adjust_popup_size'):
-            self.window.adjust_popup_size()
+            # Coalesce requests after Qt propagates size hints through the
+            # scroll area. A zero-delay callback can still see the old height.
+            self.resize_timer.start()
 
-    def queue_selection(self, item=None, *unused):
-        # Finish the mouse event before changing Maya's component selection.
-        # Keep the clicked records even if the list refreshes before applying.
+    def queue_selection(self, index=None, *unused):
+        # Only user activation selects UVs; scans and scene refreshes never do.
+        self.update_textures()
         self.selection_request += 1
         revision = self.selection_request
-        records = tuple(item.data(QtCore.Qt.UserRole) for item in self.list.selectedItems()
-                        if item.data(QtCore.Qt.UserRole) is not None)
+        record = self.list.currentData()
+        records = (record,) if record is not None else ()
         def apply():
             if not self.stopped and revision == self.selection_request:
                 if self.scene_busy():
@@ -356,6 +305,9 @@ class MaterialController(QtCore.QObject):
                 else:
                     self.select_uvs(records)
         QtCore.QTimer.singleShot(0, apply)
+
+    def update_textures(self, *unused):
+        self.textures.set_material(self.list.currentData())
 
     def select_uvs(self, records):
         try:

@@ -12,8 +12,8 @@ import maya.cmds as cmds
 from uv_straight_error_checks import Progress, MeshErrors, BoxIndex, _intersects
 from uv_straight_error_checks import read_steps as _read_steps
 
-MATCH_THRESHOLD = .99
-RATIO_EPSILON = 1.e-7  # Inclusive 99%, allowing float32 UV roundoff.
+MATCH_THRESHOLD = .95
+RATIO_EPSILON = 1.e-7  # Allow float32 UV roundoff at the inclusive threshold.
 AREA_EPSILON = 1.e-10  # Relative area threshold; shared borders are not overlaps.
 
 
@@ -24,12 +24,26 @@ class QualitySnapshot:
 
 
 @dataclass(frozen=True)
+class Finding:
+    kind: str
+    shells: tuple
+    agreement: float | None = None
+
+    @property
+    def key(self):
+        return self.kind, frozenset(self.shells)
+
+
+@dataclass(frozen=True)
 class Report:
     checked: int
     issues: tuple
     skipped: tuple
     matching_pairs: int = 0
     overlapping_pairs: int = 0
+    scope: tuple = ()
+    reviewed: tuple = ()
+    findings: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -41,10 +55,10 @@ class Triangle:
 
 
 class Shell:
-    def __init__(self, shape, triangles):
+    def __init__(self, shape, triangles, faces=None):
         self.shape = shape
         self.triangles = triangles
-        self.faces = tuple(sorted({triangle.face for triangle in triangles}))
+        self.faces = faces if faces is not None else tuple(sorted({triangle.face for triangle in triangles}))
         self.area = math.fsum(triangle.area for triangle in triangles)
         self.bbox = (min(t.bbox[0] for t in triangles), min(t.bbox[1] for t in triangles),
                      max(t.bbox[2] for t in triangles), max(t.bbox[3] for t in triangles))
@@ -99,6 +113,20 @@ def _query(index, bounds):
     for item in possible:
         if _intersects(bounds,index.items[item].bbox,True):
             yield index.items[item]
+
+
+def _focused_pairs(index,focused):
+    """Visit only pairs touching the reviewed islands, in either index order."""
+    positions = {id(shell):i for i,shell in enumerate(index.items)}
+    visited = set()
+    for first in sorted(focused):
+        for shell in _query(index,index.items[first].bbox):
+            second = positions[id(shell)]
+            if first==second:continue
+            pair = tuple(sorted((first,second)))
+            if pair not in visited:
+                visited.add(pair)
+                yield pair
 
 
 def _prepare_index(shell, progress):
@@ -170,50 +198,111 @@ def read_steps(shapes=None):
     return QualitySnapshot(Snapshot(tuple(meshes),tuple(skipped)),tuple(triangles))
 
 
-def analyse_steps(snapshot):
+def analyse_steps(snapshot,focus=None):
     """Check each actual overlapping pair; a good twin cannot hide a third shell."""
     shells,identities = [],{}
     for mesh_index,(mesh,entries) in enumerate(zip(snapshot.source.meshes,snapshot.triangles)):
         by_shell = defaultdict(list)
+        shell_faces = defaultdict(set)
+        uv_points = [tuple(map(float, point)) for point in mesh.points]
         progress = Progress('Preparing shells',mesh_index+1,len(snapshot.source.meshes))
         for index,(face,a,b,c) in enumerate(entries):
-            points = tuple(tuple(mesh.points[i]) for i in (a,b,c))
+            owner = int(mesh.shell_ids[a])
+            shell_faces[owner].add(int(face))
+            points = (uv_points[a], uv_points[b], uv_points[c])
             if all(math.isfinite(value) for p in points for value in p):
                 area = _area(points)
                 if area>0.:
                     bounds = (min(p[0] for p in points),min(p[1] for p in points),
                               max(p[0] for p in points),max(p[1] for p in points))
-                    by_shell[int(mesh.shell_ids[a])].append(Triangle(points,int(face),bounds,area))
+                    by_shell[owner].append(Triangle(points,int(face),bounds,area))
             if index%256==255:yield progress
-        shells.extend(Shell(mesh.shape,triangles) for triangles in by_shell.values())
+        shells.extend(Shell(mesh.shape, triangles, tuple(sorted(shell_faces[owner])))
+                      for owner, triangles in by_shell.items())
         identities[mesh.shape] = mesh.identity
         yield progress
+    shell_results = [MeshErrors(shell.shape, *identities[shell.shape], shell.faces) for shell in shells]
     index = BoxIndex(shells)
     bad = defaultdict(set)
+    findings = []
+    focus_faces = defaultdict(set)
+    if focus is not None:
+        for target in (focus,) if isinstance(focus, MeshErrors) else focus:
+            focus_faces[target.uuid].update(target.faces)
+    focused = {i for i, result in enumerate(shell_results) if focus is None or
+               (result.uuid in focus_faces and focus_faces[result.uuid].intersection(result.faces))}
+    folded = set()
+    representatives, geometry, repeated = {}, [], set()
+    fold_cache = {}
+
+    def check_fold(representative, progress):
+        if representative not in fold_cache:
+            fold_cache[representative] = yield from _folded(representative, progress)
+        return fold_cache[representative]
+
     for shell_index,shell in enumerate(shells):
         progress = Progress('Checking folded shells',shell_index+1,len(shells))
-        shell.folded = yield from _folded(shell,progress)
-        if shell.folded:bad[shell.shape].update(shell.faces)
+        # Only share identical, ordered triangles. Different tessellations
+        # and nearly coincident UVs still use the normal geometric test.
+        key = tuple(triangle.points for triangle in shell.triangles)
+        representative = representatives.setdefault(key, shell)
+        geometry.append(representative)
+        if representative is not shell:
+            repeated.add(representative)
+        if shell_index in focused:
+            shell.folded = yield from check_fold(representative, progress)
+            folded.add(shell_index)
+            if shell.folded:
+                bad[shell.shape].update(shell.faces)
+                findings.append(Finding('fold', (shell_results[shell_index],)))
         index.add(shell_index)
         yield progress
     matching,overlapping = 0,0
-    for shell_index,first in enumerate(shells):
+    coverage_cache = {}
+    pairs = (((i,j) for i in range(len(shells)) for j in index.candidates(i,strict=True))
+             if focus is None else _focused_pairs(index,focused))
+    for shell_index,other in pairs:
+        first,second = shells[shell_index],shells[other]
         progress = Progress('Checking overlap quality',shell_index+1,len(shells))
-        for other in index.candidates(shell_index,strict=True):
-            second = shells[other]
-            intersection,ratio = yield from _coverage(first,second,progress)
-            if intersection<=min(first.area,second.area)*AREA_EPSILON:continue
-            overlapping += 1
-            if ratio+RATIO_EPSILON>=MATCH_THRESHOLD and not first.folded and not second.folded:
-                matching += 1
+        first_geometry, second_geometry = geometry[shell_index], geometry[other]
+        # Keep the order so the clipping and accumulation order stay identical.
+        key = (first_geometry, second_geometry)
+        coverage = coverage_cache.get(key)
+        if coverage is None:
+            coverage = yield from _coverage(first_geometry, second_geometry, progress)
+            if len(coverage_cache) < 65536 and (first_geometry in repeated or second_geometry in repeated):
+                coverage_cache[key] = coverage
+        intersection,ratio = coverage
+        if intersection<=min(first.area,second.area)*AREA_EPSILON:continue
+        overlapping += 1
+        for candidate in (shell_index,other):
+            if candidate not in folded:
+                shells[candidate].folded = yield from check_fold(geometry[candidate], progress)
+                folded.add(candidate)
+        if ratio+RATIO_EPSILON>=MATCH_THRESHOLD and not first.folded and not second.folded:
+            matching += 1
+        else:
+            bad[first.shape].update(first.faces)
+            bad[second.shape].update(second.faces)
+            pair = (shell_results[shell_index], shell_results[other])
+            if first.folded or second.folded:
+                findings.append(Finding('fold_overlap', pair))
             else:
-                bad[first.shape].update(first.faces)
-                bad[second.shape].update(second.faces)
-            yield progress
+                findings.append(Finding('mismatch', pair, ratio))
         yield progress
+    scope = tuple(MeshErrors(shape,identity[0],identity[1],()) for shape,identity in identities.items())
+    reviewed = ()
+    if focus is not None:
+        selected_faces = defaultdict(set)
+        for i in focused:
+            selected_faces[shells[i].shape].update(shells[i].faces)
+        for shape in list(bad):
+            bad[shape].intersection_update(selected_faces.get(shape, ()))
+        reviewed = tuple(MeshErrors(shape, *identity, tuple(sorted(selected_faces[shape])))
+                         for shape,identity in identities.items() if identity[0] in focus_faces)
     issues = tuple(MeshErrors(shape,identity[0],identity[1],tuple(sorted(bad[shape])))
                    for shape,identity in identities.items() if bad.get(shape))
-    return Report(len(identities),issues,snapshot.source.skipped,matching,overlapping)
+    return Report(len(identities),issues,snapshot.source.skipped,matching,overlapping,scope,reviewed,tuple(findings))
 
 
 def native_steps(report):

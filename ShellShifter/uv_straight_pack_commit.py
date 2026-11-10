@@ -23,33 +23,83 @@ class UVCommit:
 
     def write(self, entry, values):
         fn=self.mesh_fn(entry)
+        assigned=entry.get('after_assigned' if values is entry['after'] else 'before_assigned')
+        if assigned is not None:fn.clearUVs(entry['uv_set'])
         fn.setUVs(values[0],values[1],entry['uv_set'])
+        if assigned is not None:fn.assignUVs(*assigned,entry['uv_set'])
         fn.updateSurface()
 
-    def create_history(self, entry, incoming, destination):
-        # Retain upstream UV edits: one native tweak node for the whole mesh.
+    def create_history(self, entry, destination):
+        # Retain upstream UV edits: one native history node for the whole mesh.
         # Direct output-data writes would be lost when a UV history node cooks.
         entry['modifiers']=[]
         mod=om.MDGModifier()
-        node=mod.createNode('polyTweakUV')
-        mod.renameNode(node,'shellShifterPackedUVs#')
+        offset=entry.get('offset')
+        assignments=entry.get('after_assigned')
+        bulk_transfer=assignments is not None or entry.get('bulk_history',False)
+        node=mod.createNode('polyTransfer' if bulk_transfer else
+                            'polyMoveUV' if offset is not None else 'polyTweakUV')
+        mod.renameNode(node,'shellShifterMovedUVs#' if offset is not None else 'shellShifterPackedUVs#')
         entry['modifiers'].append(mod);mod.doIt()
         dep=om.MFnDependencyNode(node)
-        mod=om.MDGModifier()
-        mod.newPlugValueString(dep.findPlug('uvSetName',False),entry['uv_set'])
-        tweaks=dep.findPlug('uvTweak',False)
-        before,after=entry['before'],entry['after']
-        for index in entry['ids']:
-            delta=(after[0][index]-before[0][index],after[1][index]-before[1][index])
-            if delta==(0.,0.):continue
-            plug=tweaks.elementByLogicalIndex(int(index))
-            mod.newPlugValueFloat(plug.child(0),delta[0])
-            mod.newPlugValueFloat(plug.child(1),delta[1])
-        mod.disconnect(incoming,destination)
-        mod.connect(incoming,dep.findPlug('inputPolymesh',False))
-        mod.connect(dep.findPlug('output',False),destination)
-        entry['modifiers'].append(mod);mod.doIt()
+        # The node owns these values and retains them when recreated on redo.
+        if bulk_transfer:
+            fn=self.mesh_fn(entry);data=om.MFnMeshData().create()
+            snapshot=om.MFnMesh(om.MFnMesh().copy(fn.object(),data))
+            if assignments is not None:snapshot.clearUVs(entry['uv_set'])
+            snapshot.setUVs(*entry['after'],entry['uv_set'])
+            if assignments is not None:snapshot.assignUVs(*assignments,entry['uv_set'])
+            dep.findPlug('otherPoly',False).setMObject(data)
+        else:dep.findPlug('uvSetName',False).setString(entry['uv_set'])
+        if bulk_transfer:pass
+        elif offset is not None:
+            # Translation needs two values and one component list, not two
+            # delta plugs per UV. polyMoveUV also preserves native pin weights.
+            component_fn=om.MFnSingleIndexedComponent()
+            component=component_fn.create(om.MFn.kMeshMapComponent)
+            component_fn.addElements(entry['ids'])
+            data_fn=om.MFnComponentListData();data=data_fn.create();data_fn.add(component)
+            dep.findPlug('inputComponents',False).setMObject(data)
+            dep.findPlug('translateU',False).setFloat(offset[0])
+            dep.findPlug('translateV',False).setFloat(offset[1])
+        else:
+            tweaks=dep.findPlug('uvTweak',False)
+            before,after=entry['before'],entry['after']
+            for index in entry['ids']:
+                delta=(after[0][index]-before[0][index],after[1][index]-before[1][index])
+                if delta==(0.,0.):continue
+                plug=tweaks.elementByLogicalIndex(int(index))
+                plug.child(0).setFloat(delta[0])
+                plug.child(1).setFloat(delta[1])
+        entry['history_destinations']=[destination]
+        entry['history_input']=dep.findPlug('inputPolymesh',False)
+        entry['history_output']=dep.findPlug('output',False)
+        self.connect_history(entry, True)
         self.mesh_fn(entry).updateSurface()
+
+    def connect_history(self, entry, connected):
+        history_input=entry['history_input']
+        history_output=entry['history_output']
+        modifier=om.MDGModifier()
+        if connected:
+            destinations=entry['history_destinations']
+            incoming=destinations[0].source()
+            modifier.connect(incoming,history_input)
+            for destination in destinations:
+                modifier.disconnect(destination.source(),destination)
+                modifier.connect(history_output,destination)
+        else:
+            # Live color previews can insert a node downstream of our UV edit
+            # between redo and undo. Bypass the UV node at its current location.
+            destinations=history_output.destinations()
+            incoming=history_input.source()
+            modifier.disconnect(incoming,history_input)
+            for destination in destinations:
+                modifier.disconnect(history_output,destination)
+                modifier.connect(incoming,destination)
+        modifier.doIt()
+        entry['history_destinations']=destinations
+        entry['history_connected']=connected
 
     def redoIt(self):
         self.applied=[];done=0
@@ -58,11 +108,12 @@ class UVCommit:
                 self.applied.append(entry)
                 if 'modifiers' in entry:
                     for mod in entry['modifiers']:mod.doIt()
+                    self.connect_history(entry, True)
                 else:
                     fn=self.mesh_fn(entry)
                     destination=om.MFnDependencyNode(fn.object()).findPlug('inMesh',False)
                     incoming=destination.connectedTo(True,False)
-                    if incoming:self.create_history(entry,incoming[0],destination)
+                    if incoming:self.create_history(entry,destination)
                     else:self.write(entry,entry['after'])
                 # Stack guide metadata belongs to this same Maya command:
                 # it must undo together with every mesh's UV array.
@@ -94,6 +145,8 @@ class UVCommit:
             if entry.pop('attributes_applied',False):
                 entry['attribute_modifier'].undoIt()
             if 'modifiers' in entry:
+                if entry.get('history_connected'):
+                    self.connect_history(entry, False)
                 for mod in reversed(entry['modifiers']):mod.undoIt()
             else:self.write(entry,entry['before'])
         self.applied=[]

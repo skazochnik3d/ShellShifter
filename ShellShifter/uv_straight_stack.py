@@ -1,4 +1,4 @@
-"""Stack selected isometric UV shells onto the least distorted current layout.
+"""Stack selected similar UV shells onto the least distorted current layout.
 
 Scene reads/commits stay on Maya's thread. Matching consumes plain arrays and
 UV topology, so the palette can run it on a cancellable background worker.
@@ -10,6 +10,11 @@ import numpy as np
 import maya.api.OpenMaya as om
 import maya.cmds as cmds
 from uv_straight_distortion import shell_neutral_scale
+from uv_straight_shell_match import surface, rigid_match_steps
+
+
+STACK_GEOMETRY_TOLERANCE = .05
+STACK_UV_TOLERANCE = .05
 
 
 @dataclass
@@ -131,10 +136,11 @@ def _shell(mesh_index, shell_id, uv_ids, source_faces, uv, world):
                  key,lengths,scale,score,normalized)
 
 
-def prepare():
+def prepare(meshes=None):
     """Snapshot complete selected shells in each mesh's current UV set."""
     import uv_straight as uv_tool
-    selection, meshes = uv_tool._selection()
+    if meshes is None:selection, meshes = uv_tool._selection()
+    else:selection=cmds.ls(selection=True,long=True,flatten=True) or []
     # Instances share one UV array. Merge their component selections and
     # commit that underlying mesh only once.
     unique = {}
@@ -252,7 +258,7 @@ def _propagate(source,target,seed,target_face,target_order,tolerance):
     return np.asarray([inverse[i] for i in range(len(target.uv_ids))],dtype=np.int32)
 
 
-def match_steps(source,target,tolerance=1e-4):
+def _topology_match_steps(source,target,tolerance=1e-4,accept=None):
     if source.key!=target.key or len(source.edge_lengths)!=len(target.edge_lengths):
         return None
     if not np.allclose(source.edge_lengths,target.edge_lengths,rtol=tolerance,atol=tolerance*1e-3):
@@ -276,15 +282,48 @@ def match_steps(source,target,tolerance=1e-4):
     for _,other,order in sorted(candidates):
         yield None
         mapping = _propagate(source,target,seed,other,order,tolerance)
-        if mapping is not None:
+        if mapping is not None and (accept is None or accept(source,target,mapping)):
             return mapping
     return None
+
+
+def match_steps(source,target,tolerance=1e-4):
+    mapping=yield from _topology_match_steps(source,target,tolerance)
+    if mapping is not None:return mapping
+    return (yield from rigid_match_steps(source,target,tolerance))
+
+
+def _similar_uvs(source, target, mapping):
+    """Compare corresponding UVs after a similarity fit, including reflections."""
+    a, b = source.uv[mapping], target.uv
+    a, b = a - a.mean(axis=0), b - b.mean(axis=0)
+    u, singular_values, v = np.linalg.svd(a.T @ b)
+    scale = singular_values.sum() / np.sum(a * a)
+    _, axes = np.linalg.eigh(b.T @ b)
+    a, b = (a @ (u @ v) @ axes) * scale, b @ axes
+    # Measure along and across each chart. A long strip's length must not
+    # hide a difference in its width.
+    span = np.minimum(np.ptp(a, axis=0), np.ptp(b, axis=0))
+    error = np.max(np.abs(a - b), axis=0)
+    return bool(np.all(error <= STACK_UV_TOLERANCE * span))
+
+
+def _stack_match_steps(source, target):
+    mapping = yield from match_steps(source, target)
+    if mapping is not None:
+        return mapping
+    if any(shell.score[0] or not math.isfinite(shell.score[1]) for shell in (source, target)):
+        return None
+    # Near matches still need a complete topology mapping and similar 3D
+    # face proportions. A matching silhouette by itself is insufficient.
+    return (yield from _topology_match_steps(
+        source, target, STACK_GEOMETRY_TOLERANCE, accept=_similar_uvs))
 
 
 def analyse_steps(records):
     buckets=defaultdict(list)
     for index,shell in enumerate(records):
-        buckets[shell.key].append(index)
+        buckets[surface(shell.faces,len(shell.uv_ids))[0]].append(index)
     groups,unmatched=[],[]
     processed=0
     for indices in buckets.values():
@@ -293,7 +332,7 @@ def analyse_steps(records):
             keeper=remaining.pop(0)
             matched=[];left=[]
             for other in remaining:
-                steps=match_steps(records[keeper],records[other])
+                steps=_stack_match_steps(records[keeper],records[other])
                 try:
                     while True:
                         next(steps)
@@ -315,7 +354,47 @@ def analyse_steps(records):
     return Plan(groups,unmatched,len(records))
 
 
-def apply(prepared,plan):
+def matched_placement(source,target,mapping):
+    """Copy shape while retaining target center, UV area and closest orientation."""
+    values=source.uv[mapping]
+    a=values-values.mean(axis=0);b=target.uv-target.uv.mean(axis=0)
+    def area(coords,faces):
+        return math.fsum(abs(float(np.sum(coords[list(f),0]*np.roll(coords[list(f),1],-1)-
+                                         np.roll(coords[list(f),0],-1)*coords[list(f),1])))*.5 for f in faces)
+    source_area=area(values,target.faces);target_area=area(target.uv,target.faces)
+    if source_area<=1e-20 or target_area<=1e-20:
+        raise ValueError('Match UVs requires noncollapsed source and target UVs.')
+    u,_,v=np.linalg.svd(a.T@b)
+    return a@(u@v)*math.sqrt(target_area/source_area)+target.uv.mean(axis=0)
+
+
+def match_selected_steps(records,sources):
+    """Only explicit source shells may act as templates inside a captured scope."""
+    sources=set(sources)
+    if not sources:raise ValueError('Select at least one source UV shell.')
+    buckets=defaultdict(list)
+    for i in sorted(sources,key=lambda i:(records[i].score,i)):
+        if math.isfinite(records[i].score[1]):buckets[surface(records[i].faces,len(records[i].uv_ids))[0]].append(i)
+    groups=defaultdict(list);unmatched=[]
+    for i,target in enumerate(records):
+        if i in sources:continue
+        found=False
+        for source in buckets[surface(target.faces,len(target.uv_ids))[0]]:
+            steps=match_steps(records[source],target)
+            try:
+                while True:
+                    next(steps);yield (i,len(records))
+            except StopIteration as done:mapping=done.value
+            finally:steps.close()
+            if mapping is not None:
+                groups[source].append((i,mapping));found=True;break
+            yield (i,len(records))
+        if not found:unmatched.append(i)
+        yield (i+1,len(records))
+    return Plan(list(groups.items()),unmatched,len(records))
+
+
+def apply(prepared,plan,preserve_placement=False):
     """Validate the snapshot and commit all destination arrays as one Undo."""
     import uv_straight as uv_tool
     from uv_straight_pack_commit import commit
@@ -339,7 +418,7 @@ def apply(prepared,plan):
         source=prepared['records'][keeper]
         for other,mapping in targets:
             target=prepared['records'][other];index=target.mesh_index
-            after=source.uv[mapping]
+            after=matched_placement(source,target,mapping) if preserve_placement else source.uv[mapping]
             if np.array_equal(after,target.uv):
                 continue
             if index not in entries:
@@ -350,7 +429,7 @@ def apply(prepared,plan):
             entry['after'][target.uv_ids]=after
             entry['ids'].extend(int(i) for i in target.uv_ids);entry['shells']+=1
     if entries:
-        with uv_tool._undo('ShellShifter Stack Similar Shells'):
+        with uv_tool._undo('ShellShifter Match UVs' if preserve_placement else 'ShellShifter Stack Similar Shells'):
             for index,entry in entries.items():
                 mesh=prepared['meshes'][index]['mesh']
                 current=uv_tool._marks(mesh)

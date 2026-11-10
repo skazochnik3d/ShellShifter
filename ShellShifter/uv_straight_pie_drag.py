@@ -57,7 +57,7 @@ class PieDragOverlay(QtWidgets.QWidget):
     def begin_external(self, action, point, pointer_owner=None):
         node=pie.entry(action)
         metrics=QtGui.QFontMetrics(self.canvas.menu_font())
-        width=min(290,max(90,metrics.horizontalAdvance(node['label'])+38))
+        width=min(290,max(104 if action in pie.COMPOUND_ACTIONS else 90,metrics.horizontalAdvance(node['label'])+38))
         rect=QtCore.QRectF(point.x()-width*.5,point.y()-14,width,28)
         region=dict(node=node,rect=rect,direction=None,parent=None,before=None)
         self.begin(region,point)

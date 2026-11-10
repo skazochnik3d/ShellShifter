@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <title>Texture Transfer</title>
+  <g stroke="#282d31" stroke-width="1.7" stroke-linejoin="round">
+    <rect x="7.55" y="0.85" width="15.6" height="15.6" rx="5" fill="#806a3e"/>
+    <rect x="0.85" y="7.55" width="15.6" height="15.6" rx="5" fill="#bba370"/>
+  </g>
+</svg>

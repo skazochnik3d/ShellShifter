@@ -102,22 +102,23 @@ def _color_scale(shells):
     return center - span * .5, span
 
 
-def _density_color(density, scale, reference=None):
+def _density_color(density, scale, reference=None,contrast=1.):
     if reference is not None:
         # Fixed analysis reference: monotonic for every positive density, with
         # no min/max clipping or recoloring of unchanged shells after an edit.
-        return gradient(density / (density + reference))
-    return gradient(.5 if scale is None else (density - scale[0]) / scale[1])
+        position=density / (density + reference)
+    else:position=.5 if scale is None else (density - scale[0]) / scale[1]
+    return gradient(.5+(position-.5)*contrast)
 
 
-def _group(shells, group_count, color_reference=None):
+def _group(shells, group_count, color_reference=None,contrast=1.):
     low = min(shell.density for shell in shells)
     high = max(shell.density for shell in shells)
     count = max(1, min(int(group_count), len(shells)))
     if math.isclose(low, high, rel_tol=DENSITY_REL_TOLERANCE,
                     abs_tol=DENSITY_ABS_TOLERANCE):
         representative = math.fsum(shell.density for shell in shells) / len(shells)
-        return [DensityGroup(low, high, _density_color(representative, None, color_reference),
+        return [DensityGroup(low, high, _density_color(representative, None, color_reference,contrast),
                              shells, color_reference)]
     width = (high-low)/count
     scale = _color_scale(shells)
@@ -131,7 +132,7 @@ def _group(shells, group_count, color_reference=None):
             representative = math.fsum(s.density for s in bucket) / len(bucket)
             result.append(DensityGroup(min(s.density for s in bucket),
                                        max(s.density for s in bucket),
-                                       _density_color(representative, scale, color_reference),
+                                       _density_color(representative, scale, color_reference,contrast),
                                        bucket, color_reference))
     return result
 
@@ -183,10 +184,47 @@ def selected_shells(resolution=2048):
 
 def get_density(resolution=2048):
     """Arithmetic mean of the selected shells, with equal weight per shell."""
-    shells = selected_shells(resolution)
-    if not shells:
+    import numpy as np
+    import uv_straight as uv
+    _, meshes = uv._selection(build_edges=False)
+    densities=[]
+    for mesh in meshes:
+        selected={mesh.shell_ids[i] for i in mesh.selected}
+        uv_counts,uv_ids=mesh.fn.getAssignedUVs(mesh.uv_set)
+        counts,vertices=mesh.fn.getVertices()
+        triangle_counts,triangle_vertices=mesh.fn.getTriangles()
+        uv_ids=list(uv_ids)
+        vertices=list(vertices)
+        triangle_vertices=list(triangle_vertices)
+        world_tris=[]; uv_tris=[]; owners=[]
+        uv_offset=vertex_offset=triangle_offset=0
+        for uc,vc,tc in zip(uv_counts,counts,triangle_counts):
+            if uc==vc and uc:
+                owner=mesh.shell_ids[uv_ids[uv_offset]]
+                if owner in selected:
+                    mapping=dict(zip(vertices[vertex_offset:vertex_offset+vc],uv_ids[uv_offset:uv_offset+uc]))
+                    ids=triangle_vertices[triangle_offset:triangle_offset+3*tc]
+                    world_tris.extend(ids)
+                    uv_tris.extend(mapping[i] for i in ids)
+                    owners.extend([owner]*tc)
+            uv_offset+=uc
+            vertex_offset+=vc
+            triangle_offset+=3*tc
+        if not owners:continue
+        xyz=np.asarray([(p.x,p.y,p.z) for p in mesh.fn.getPoints(om.MSpace.kWorld)])
+        coords=np.asarray(list(mesh.points.values()))
+        w=xyz[np.asarray(world_tris).reshape(-1,3)]
+        t=coords[np.asarray(uv_tris).reshape(-1,3)]
+        world=np.linalg.norm(np.cross(w[:,1]-w[:,0],w[:,2]-w[:,0]),axis=1)
+        u,v=t[:,1]-t[:,0],t[:,2]-t[:,0]
+        area=np.abs(u[:,0]*v[:,1]-u[:,1]*v[:,0])
+        world=np.bincount(owners,weights=world)
+        area=np.bincount(owners,weights=area)
+        valid=(world>2e-20)&(area>2e-20)
+        densities.extend(resolution*np.sqrt(area[valid]/world[valid]))
+    if not densities:
         raise ValueError('Select one or more measurable UV shells.')
-    return math.fsum(shell.density for shell in shells)/len(shells)
+    return math.fsum(densities)/len(densities)
 
 
 def set_density(target, resolution=2048):
@@ -214,7 +252,7 @@ def set_density(target, resolution=2048):
     return len(shells)
 
 
-def _colored_shells(groups):
+def _colored_shells(groups,contrast=1.):
     shells = [shell for group in groups for shell in group.shells]
     if not shells:
         return []
@@ -228,32 +266,32 @@ def _colored_shells(groups):
         for shell in group.shells:
             # Equal densities, including float32 roundoff, have EXACTLY one color.
             density = representative if uniform else shell.density
-            result.append((shell, _density_color(density, scale, group.color_reference)))
+            result.append((shell, _density_color(density, scale, group.color_reference,contrast)))
     return result
 
 
-def viewport_payload(groups, alpha=.72):
+def viewport_payload(groups, alpha=.72,contrast=1.):
     """Give every shell its exact position on the continuous color scale.
 
     UI groups intentionally remain broad, but the viewport does not quantize
     all shells in a group to the same representative color.
     """
     return [(rgb + (float(alpha),), list(shell.triangles))
-            for shell, rgb in _colored_shells(groups)]
+            for shell, rgb in _colored_shells(groups,contrast)]
 
 
-def viewport_color_payload(groups):
+def viewport_color_payload(groups,contrast=1.):
     """Return Maya-native per-face colors without a custom VP2 draw node."""
     payload = []
-    for shell, rgb in _colored_shells(groups):
+    for shell, rgb in _colored_shells(groups,contrast):
         payload.extend((shell.mesh.name, face, tuple(rgb)+(1.,))
                        for face in shell.face_ids)
     return payload
 
 
-def show(groups):
+def show(groups,contrast=1.):
     import uv_straight_native as native
-    payload = viewport_color_payload(groups)
+    payload = viewport_color_payload(groups,contrast)
     if payload:
         native.set_viewport_overlay(payload, 'texel_density')
     else:

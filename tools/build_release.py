@@ -8,7 +8,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT/'ShellShifter'
-DOCS = ROOT/'docs'
+DOCS = RUNTIME
 
 
 def build():
@@ -23,7 +23,7 @@ def build():
         raise ValueError('Duplicate runtime paths')
     package = {}
     inputs = {name: RUNTIME/name for name in runtime}
-    inputs.update({'README.md': ROOT/'README.md',
+    inputs.update({'README.md': RUNTIME/'README.md',
                    'INSTALL_RU.txt': DOCS/'INSTALL_RU.txt', 'INSTALL_EN.txt': DOCS/'INSTALL_EN.txt'})
     for name, source in inputs.items():
         path = source.resolve()
@@ -44,7 +44,7 @@ def build():
     output = ROOT/'build'
     output.mkdir(exist_ok=True)
     releases = dict(version=version, assets={})
-    for year in ('2025', '2027'):
+    for year in ('2025', '2026', '2027'):
         manifest = dict(product='ShellShifter', version=version, maya=year,
                         tested_platform='Windows / Autodesk Maya '+year,
                         entry_point='install_shellshifter.py',

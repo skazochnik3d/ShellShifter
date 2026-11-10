@@ -2,7 +2,7 @@
 import math
 
 AREA_CHOICES=(('square','Square',(1.,1.)),
-              ('horizontal','Bottom Half',(1.,.5)))
+              ('horizontal','Half',(1.,.5)))
 
 
 def area_size(value):

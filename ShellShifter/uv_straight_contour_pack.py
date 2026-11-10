@@ -7,7 +7,7 @@ test all horizontal origins in parallel through forbidden-origin dilation.
 import math
 import random
 import numpy as np
-from uv_straight_pack_search import counted_trial
+from uv_straight_pack_search import counted_trial,SAMPLED_SEARCH_GROUPS
 from uv_straight_pack_area import grid_extent, scale_limit
 
 
@@ -120,6 +120,21 @@ def _location(occupied, padded, width, height, gap, margin, size, monitor, ceili
     return None
 
 
+def _hull_area(triangles):
+    points=sorted({tuple(point) for triangle in triangles for point in triangle})
+    if len(points)<3:return 0.
+    def chain(points):
+        hull=[]
+        for point in points:
+            while len(hull)>=2:
+                a,b=hull[-2:]
+                if (b[0]-a[0])*(point[1]-a[1])>(b[1]-a[1])*(point[0]-a[0]):break
+                hull.pop()
+            hull.append(point)
+        return hull
+    hull=chain(points)[:-1]+chain(reversed(points))[:-1]
+    return abs(sum(a[0]*b[1]-a[1]*b[0] for a,b in zip(hull,hull[1:]+hull[:1])))*.5
+
 def _order(boxes,ordering):
     mode=ordering%6
     rng=random.Random(ordering)
@@ -136,8 +151,8 @@ def _order(boxes,ordering):
 
 
 def rotation_options(box,rotate):
-    # Horizontal orientations win equal-position ties; vertical alternatives
-    # remain available when they fill a pocket the horizontal shape cannot.
+    # Horizontal strips are preferred at equal fits, but vertical placements
+    # remain available when they improve density or fill a narrow corridor.
     return (0,1,2,3) if rotate else (0,)
 
 
@@ -172,23 +187,44 @@ def _cell_origin(box,scale,grid,x,y,turn):
 
 
 def _static_rows(static_triangles,grid,monitor,backend):
-    if not static_triangles:return [0]*grid
+    """Search-owned immutable obstacles; shell commits always use a copy."""
+    monitor.check()
+    source=getattr(monitor,'static_source',None)
+    if source is not static_triangles:
+        monitor.static_source=static_triangles
+        monitor.static_rows={}
+    cache=monitor.static_rows
+    key=(grid,backend is not None)
+    if key in cache:
+        monitor.static_cache_hits+=1
+        return cache[key]
     raster=backend.raster if backend is not None else raster_triangles
-    return list(_rows(raster([[(x*grid,y*grid) for x,y in tri]
-                             for tri in static_triangles],grid,grid,monitor)))
+    rows=(_rows(raster([[(x*grid,y*grid) for x,y in tri]
+                             for tri in static_triangles],grid,grid,monitor))
+          if static_triangles else (0,)*grid)
+    monitor.check()
+    cache[key]=rows
+    monitor.static_cache_builds+=1
+    return rows
 
 
 @counted_trial(8)
 def trial(boxes, triangles, scale, grid, gap, margin, rotate, static_triangles,
-          monitor, ordering=0, backend=None):
+          monitor, ordering=0, backend=None, order=None):
+    order=list(_order(boxes,ordering) if order is None else order)
+    if len(order)!=len(boxes) or set(order)!=set(range(len(boxes))):
+        raise ValueError('Packing order must contain every group exactly once.')
     gap_cells,margin_cells = math.ceil(gap*grid),math.ceil(margin*grid)
     extent_x,extent_y=grid_extent(grid,monitor)
     occupied = _static_rows(static_triangles,grid,monitor,backend)
+    if backend is None or not hasattr(backend,'place_group'):occupied=list(occupied)
     raster=backend.raster if backend is not None else raster_triangles
     if backend is not None: backend.reset(occupied,grid)
     resident=backend is not None and hasattr(backend,'place_group')
     if resident:backend.bind_geometry(boxes,triangles)
-    order=_order(boxes,ordering)
+    if getattr(monitor,'pack_groups',None):
+        from uv_straight_pack_groups import preferred_order
+        order=preferred_order(order,monitor.pack_groups)
     positions,turns = {},{}
     for placed,index in enumerate(order):
         monitor.update('Packing shell contours',placed,len(order))
@@ -199,34 +235,51 @@ def trial(boxes, triangles, scale, grid, gap, margin, rotate, static_triangles,
             return None
         if resident:
             result=backend.place_group(index,scale,gap_cells,margin_cells,rotate,monitor)
-            if result is None:return None
+            if result is None:
+                _remember_failure(monitor,dict(scale=scale,order=tuple(order),
+                                  index=index,placed=placed,objective=0))
+                return None
             x,y,turn=result
             dx=(ih-h) if turn==1 else (iw-w) if turn==2 else 0.
             dy=(ih-h) if turn==2 else (iw-w) if turn==3 else 0.
             positions[index],turns[index]=((x+dx)/grid,(y+dy)/grid),turn
             continue
-        base = raster([[(x*scale*grid,y*scale*grid) for x,y in tri]
-                                 for tri in triangles[index]],iw,ih,monitor)
+        profiles=getattr(monitor,'shape_profiles',None)
+        proxy=None
+        if profiles is not None:
+            from uv_straight_pack_shapes import select
+            proxy=select(profiles[index],scale,monitor.shape_resolution)
         best = None
-        seen = set()
         # Prefer horizontal strips at equal bottom-left positions.
         options = rotation_options(boxes[index],rotate)
-        for turn in options:
-            mask = np.rot90(base,-turn) if turn else base
-            height,width = mask.shape
-            if width > extent_x-2*margin_cells or height > extent_y-2*margin_cells: continue
-            raw = _rows(mask)
-            identity = (width,height,raw)
-            if identity in seen: continue
-            seen.add(identity)
-            locate=backend.location if backend is not None else _location
-            location = locate(occupied,_expand(raw,gap_cells),width,height,gap_cells,
-                                 margin_cells,grid,monitor,best[0] if best is not None else None)
-            if location is not None:
-                x,y = location
-                candidate = (y,x,height,width,turn,raw)
-                if best is None or candidate[:5] < best[:5]: best = candidate
-        if best is None: return None
+        for use_proxy in ((True,False) if proxy is not None else (False,)):
+            if use_proxy:
+                from uv_straight_pack_shapes import raster as primitive_raster
+                base=primitive_raster(proxy,iw,ih,scale*grid)
+            else:
+                base = raster([[(x*scale*grid,y*scale*grid) for x,y in tri]
+                                         for tri in triangles[index]],iw,ih,monitor)
+            seen = set()
+            for turn in options:
+                mask = np.rot90(base,-turn) if turn else base
+                height,width = mask.shape
+                if width > extent_x-2*margin_cells or height > extent_y-2*margin_cells: continue
+                raw = _rows(mask)
+                identity = (width,height,raw)
+                if identity in seen: continue
+                seen.add(identity)
+                locate=backend.location if backend is not None else _location
+                location = locate(occupied,_expand(raw,gap_cells),width,height,gap_cells,
+                                     margin_cells,grid,monitor,best[0] if best is not None else None)
+                if location is not None:
+                    x,y = location
+                    candidate = (y,x,height,width,turn,raw)
+                    if best is None or candidate[:5] < best[:5]: best = candidate
+            if best is not None:break
+        if best is None:
+            _remember_failure(monitor,dict(scale=scale,order=tuple(order),
+                              index=index,placed=placed,objective=0))
+            return None
         y,x,height,width,turn,raw = best
         if backend is not None: backend.commit(raw,width,x,y)
         for dy,bits in enumerate(raw): occupied[y+dy] |= bits << x
@@ -259,25 +312,60 @@ def trial_many(boxes,triangles,scale,grid,gap,margin,rotate,static_triangles,
     """One cycle contains four independently evaluated placement candidates."""
     monitor.parallel=len(orderings)
     orders=orders if orders is not None else [_order(boxes,ordering) for ordering in orderings]
+    if getattr(monitor,'pack_groups',None):
+        from uv_straight_pack_groups import preferred_order
+        orders=[preferred_order(order,monitor.pack_groups) for order in orders]
     layouts=[({}, {}) for _ in orders]
+    histories=[[] for _ in orders]
+    rescued=[False]*len(orders)
     monitor.attempt(len(orders))
     try:
         occupied=_static_rows(static_triangles,grid,monitor,backend)
         backend.reset_many(occupied,grid,len(orderings));backend.bind_geometry(boxes,triangles)
         gap_cells,margin_cells=math.ceil(gap*grid),math.ceil(margin*grid)
+        pending=[]
+        sequence=max(1,min(8,int(getattr(backend,'sequence_steps',1))))
         for placed in range(len(boxes)):
             monitor.update('Packing layouts in parallel',placed,len(boxes))
             indices=[order[placed] if layout is not None else None for order,layout in zip(orders,layouts)]
-            locations=backend.place_many(indices,scale,gap_cells,margin_cells,rotate,monitor)
+            if not pending:
+                if sequence>1 and hasattr(backend,'place_sequence'):
+                    limit=min(len(boxes),placed+sequence)
+                    if monitor.tail_size:
+                        boundary=max(0,len(boxes)-64)
+                        limit=min(limit,boundary) if placed<boundary else placed+1
+                    steps=[[order[at] if layout is not None else None for order,layout in zip(orders,layouts)]
+                           for at in range(placed,limit)]
+                    pending=backend.place_sequence(steps,scale,gap_cells,margin_cells,rotate,monitor)
+                else:pending=[backend.place_many(indices,scale,gap_cells,margin_cells,rotate,monitor)]
+            locations=pending.pop(0)
             for slot,(index,location) in enumerate(zip(indices,locations)):
                 if layouts[slot] is None:continue
                 if location is None:
+                    if (monitor.tail_size and not rescued[slot] and not pending and
+                            placed>=max(len(boxes)-64,int(len(boxes)*.9)) and hasattr(backend,'edit_placed')):
+                        from uv_straight_pack_refine import rescue_tail
+                        rescued[slot]=True
+                        recovered=rescue_tail(boxes,histories[slot],index,slot,len(orders),scale,
+                            gap_cells,margin_cells,rotate,monitor,backend,orders[slot][placed+1:placed+5])
+                        if recovered is not None:
+                            count,new=recovered
+                            old=histories[slot][-count:]
+                            histories[slot][-count:]=new
+                            orders[slot][placed-count:placed+1]=[j for j,x,y,t in new]
+                            for j,x,y,t in old:
+                                del layouts[slot][0][j];del layouts[slot][1][j]
+                            for j,x,y,t in new:
+                                layouts[slot][0][j]=_cell_origin(boxes[j],scale,grid,x,y,t)
+                                layouts[slot][1][j]=t
+                            continue
                     monitor.finish_attempt(False)
                     modes=getattr(backend,'current_modes',[0]*len(orders))
                     _remember_failure(monitor,dict(scale=scale,order=tuple(orders[slot]),
                         index=index,placed=placed,objective=modes[slot]))
                     layouts[slot]=None;continue
                 x,y,turn=location
+                if monitor.tail_size:histories[slot].append((index,x,y,turn))
                 layouts[slot][0][index]=_cell_origin(boxes[index],scale,grid,x,y,turn)
                 layouts[slot][1][index]=turn
             if not any(layout is not None for layout in layouts):break
@@ -335,6 +423,32 @@ def _promote_failed(monitor,variation):
     return order,failure['objective']
 
 
+def _repair_region(boxes,seed,ordering):
+    """Vary compact spatial neighbourhoods, including edges of empty pockets."""
+    rng=random.Random(ordering)
+    centers={i:(x+boxes[i][int(seed['turns'][i])%2]*seed['scale']*.5,
+                y+boxes[i][1-int(seed['turns'][i])%2]*seed['scale']*.5)
+             for i,(x,y) in seed['positions'].items()}
+    mode=ordering%4
+    if mode==3:
+        # A small sampling grid only chooses a neighbourhood. All placements
+        # still use exact conservative contour masks and the requested gaps.
+        def clearance(point):
+            return min(max(abs(point[0]-cx)-boxes[i][int(seed['turns'][i])%2]*seed['scale']*.5,
+                           abs(point[1]-cy)-boxes[i][1-int(seed['turns'][i])%2]*seed['scale']*.5)
+                       for i,(cx,cy) in centers.items())
+        extent=(max(x+boxes[i][int(seed['turns'][i])%2]*seed['scale'] for i,(x,y) in seed['positions'].items()),
+                max(y+boxes[i][1-int(seed['turns'][i])%2]*seed['scale'] for i,(x,y) in seed['positions'].items()))
+        anchor=max(((x*extent[0]/8,y*extent[1]/8) for x in range(1,8) for y in range(1,8)),key=clearance)
+    else:anchor=centers[rng.randrange(len(boxes))]
+    ax,ay=anchor
+    priority=sorted(centers,key=lambda i:
+                    -centers[i][1] if mode==0 else -centers[i][0] if mode==1 else
+                    (centers[i][0]-ax)**2+(centers[i][1]-ay)**2)
+    fraction=(32,16,8)[(ordering//4)%3]
+    return set(priority[:max(2,len(boxes)//fraction)])
+
+
 @counted_trial(8)
 def repair(boxes,triangles,scale,grid,gap,margin,rotate,static_triangles,
            monitor,ordering,backend,seed):
@@ -350,17 +464,12 @@ def repair(boxes,triangles,scale,grid,gap,margin,rotate,static_triangles,
     backend.bind_geometry(boxes,triangles)
     gap_cells,margin_cells=math.ceil(gap*grid),math.ceil(margin*grid)
     ratio=scale/seed['scale']
-    # Rotate among spatial clusters at the top, right and a selected shell.
-    rng=random.Random(ordering)
-    anchor=list(seed['positions'])[rng.randrange(len(boxes))]
-    ax,ay=seed['positions'][anchor]
-    mode=ordering%3
-    priority=sorted(range(len(boxes)),key=lambda i:
-        -(seed['positions'][i][1] if mode==0 else seed['positions'][i][0]) if mode<2 else
-        (seed['positions'][i][0]-ax)**2+(seed['positions'][i][1]-ay)**2)
-    moving=set(priority[:max(1,len(boxes)//8)])
+    moving=_repair_region(boxes,seed,ordering)
     positions,turns={},{}
-    for done,index in enumerate(_order(boxes,ordering)):
+    order=list(seed.get('order',seed['positions']))
+    if len(order)!=len(boxes) or set(order)!=set(range(len(boxes))):order=_order(boxes,ordering)
+    fixed=[]
+    for done,index in enumerate(order):
         monitor.update('Refining the best layout',done,len(boxes))
         if index in moving:continue
         turn=int(seed['turns'][index])
@@ -368,14 +477,28 @@ def repair(boxes,triangles,scale,grid,gap,margin,rotate,static_triangles,
         px,py=margin+(px-margin)*ratio,margin+(py-margin)*ratio
         dx,dy=_cell_origin(boxes[index],scale,grid,0,0,turn)
         x,y=math.ceil((px-dx)*grid-1e-8),math.ceil((py-dy)*grid-1e-8)
-        if backend.fixed_group(index,scale,gap_cells,margin_cells,turn,x,y,rotate,monitor):
+        fixed.append((index,turn,x,y))
+    if hasattr(backend,'fixed_groups'):
+        accepted=backend.fixed_groups(fixed,scale,gap_cells,margin_cells,rotate,monitor)
+    else:
+        accepted=[backend.fixed_group(index,scale,gap_cells,margin_cells,turn,x,y,rotate,monitor)
+                  for index,turn,x,y in fixed]
+    for (index,turn,x,y),fits in zip(fixed,accepted):
+        if fits:
             positions[index]=_cell_origin(boxes[index],scale,grid,x,y,turn);turns[index]=turn
             monitor.fixed_shells+=1
         else:moving.add(index)
+    # Freeing a region can reject a large fixed chart as well as small nearby
+    # charts. Reinsert difficult large shapes before small pocket fillers.
     for index in _order(boxes,ordering):
         if index not in moving:continue
         monitor.update('Repairing a local region',len(positions),len(boxes))
-        location=backend.place_group(index,scale,gap_cells,margin_cells,rotate,monitor)
+        if hasattr(backend,'place_many'):
+            previous_modes=getattr(backend,'placement_modes',None)
+            backend.placement_modes=[seed.get('objective',0)]
+            try:location=backend.place_many([index],scale,gap_cells,margin_cells,rotate,monitor)[0]
+            finally:backend.placement_modes=previous_modes
+        else:location=backend.place_group(index,scale,gap_cells,margin_cells,rotate,monitor)
         if location is None:return None
         x,y,turn=location
         positions[index]=_cell_origin(boxes[index],scale,grid,x,y,turn);turns[index]=turn
@@ -387,7 +510,10 @@ def search(boxes, triangles, areas, gap, margin, rotate, static_triangles, monit
     import time
     from uv_straight_pack_search import StageExpired, SearchStopped
     upper = scale_limit(boxes,monitor.target_size,margin,rotate,areas)
-    if backend is not None and hasattr(backend,'shelves_many') and len(boxes)>=512 and not static_triangles:
+    packed_area=sum(areas)
+    resumed=getattr(monitor,'resumed',False)
+    upgraded=getattr(monitor,'search_upgrade',False)
+    if not resumed and backend is not None and hasattr(backend,'shelves_many') and len(boxes)>=SAMPLED_SEARCH_GROUPS and not static_triangles:
         # Explore complete large layouts without thousands of host/GPU roundtrips.
         # Contour placement subsequently improves on the safe box-based floor.
         low=monitor.best['scale'] if monitor.best else 0.
@@ -404,7 +530,8 @@ def search(boxes, triangles, areas, gap, margin, rotate, static_triangles, monit
                 results=backend.shelves_many(boxes,candidate,grid,gap,margin,rotate,orders,monitor)
                 complete=False
                 for order,result in zip(orders,results):
-                    if result is not None:complete=True;monitor.consider(candidate,*result,order=order)
+                    if result is not None:
+                        complete=monitor.consider(candidate,*result,order=order) or complete
                 if complete:low=max(low,candidate)
                 else:high=candidate;growing=False
                 if high-low<=max(1e-7,high*.0005):break
@@ -412,19 +539,36 @@ def search(boxes, triangles, areas, gap, margin, rotate, static_triangles, monit
         finally:
             monitor.stage_deadline=previous_deadline
             monitor.parallel=1
+    contour_floor=monitor.best['scale'] if monitor.best is not None else 0.
+    compact_seed=False
+    if not resumed and getattr(monitor,'tabi_seed',False) and backend is not None and hasattr(backend,'tabi_many') and len(boxes)>=12:
+        from uv_straight_pack_tabi import seed as compact_start
+        try:compact_seed=compact_start(boxes,triangles,areas,gap,margin,rotate,static_triangles,monitor,grid,backend)
+        except StageExpired:compact_seed=monitor.tabi_validated>0
     # Large selections first obtain a usable shape layout on a coarser grid.
     # Coarse padding rounds upward, so all saved plans still meet pixel gaps.
     stages=[grid]
-    if len(boxes)>200 and grid>1024 and monitor.best is None:
+    large_gpu=backend is not None and hasattr(backend,'place_many') and len(boxes)>=SAMPLED_SEARCH_GROUPS
+    if large_gpu:
+        # A rectangle seed is only a safe floor, not a dense contour layout.
+        # Obtain useful scale cheaply before paying for 4K/8K contour masks.
+        stages=list(dict.fromkeys((min(grid,1024),min(grid,2048),grid)))
+    elif len(boxes)>200 and grid>1024 and monitor.best is None:
         stages=[1024,grid]
-    elif backend is not None and hasattr(backend,'place_many') and len(boxes)>=512 and grid<8192:
-        stages=[grid,min(8192,grid*2)]
+    if resumed:stages=[]
     unlimited=not monitor.seconds
     remaining=30. if unlimited else max(0.,monitor.deadline-time.monotonic())
+    if large_gpu:
+        # Search Limit controls total effort, not how slowly startup explores
+        # scales. In Unlimited the last precision stage used to have no bound,
+        # delaying order refinement for tens of seconds on large selections.
+        remaining=min(20.,remaining)
     start=time.monotonic()
-    shares=[.5,1.] if len(stages)==2 else [1.]
+    shares=([.3,.65,1.] if len(stages)==3 else [.45,1.] if len(stages)==2 else [1.])
     parallel=backend is not None and hasattr(backend,'place_many') and len(boxes)>=12
     def attempt(candidate,precision,ordering,orders=None,modes=None):
+        if precision<grid:monitor.coarse_attempts+=1
+        else:monitor.fine_attempts+=1
         if parallel:
             backend.placement_modes=(modes if modes is not None else
                 [monitor.best.get('objective',0)]*2+[0,1] if orders is not None and monitor.best else None)
@@ -433,31 +577,54 @@ def search(boxes, triangles, areas, gap, margin, rotate, static_triangles, monit
             results=trial_many(boxes,triangles,candidate,precision,gap,margin,rotate,
                        static_triangles,monitor,orderings,backend,orders)
         else:
-            orders=[_order(boxes,ordering)]
+            orders=[list(orders[0]) if orders is not None else _order(boxes,ordering)]
             results=[trial(boxes,triangles,candidate,precision,gap,margin,rotate,
-                       static_triangles,monitor,ordering,backend)]
+                       static_triangles,monitor,ordering,backend,order=orders[0])]
         complete=False
         for slot,(order,result) in enumerate(zip(orders,results)):
             if result is not None:
                 mode=getattr(backend,'current_modes',[0]*len(orders))[slot] if parallel else 0
-                complete=True;monitor.consider(candidate,*result,order=order,objective=mode)
+                # Preserve the effective order after material-group priorities
+                # or tail rescue, rather than the originally requested sequence.
+                complete=monitor.consider(candidate,*result,order=tuple(result[0]),objective=mode) or complete
         return complete
     try:
-        for precision,share in zip(stages,shares):
+        for requested_precision,share in zip(stages,shares):
             monitor.check()
-            monitor.stage_deadline=start+remaining*share if share<1. else None
-            monitor.precision=precision
+            end=start+remaining*share
+            monitor.stage_deadline=end if share<1. or (large_gpu and end<monitor.deadline) else None
             low=monitor.best['scale'] if monitor.best is not None else 0.
+            # A fine-grid proxy seed is an additional complete layout. Keep
+            # the established first coarse scale probes: rounding differs
+            # there, and changing these probes can redirect the whole search.
+            if compact_seed and large_gpu and len(stages)>1 and requested_precision==stages[0]:low=contour_floor
+            coverage=(packed_area*low*low+monitor.static_area)/monitor.target_area
+            precision=requested_precision
+            monitor.precision=precision
             high=upper
             growing=True
-            growth=(1.002 if len(boxes)>200 else
-                    1.01 if precision != stages[0] else 1.04)
+            growth=((1.002 if precision>=4096 else 1.06 if coverage<.6 else 1.03 if coverage<.75 else 1.002) if large_gpu else
+                    1.002 if len(boxes)>200 else 1.01 if precision != stages[0] else 1.04)
             candidate=min(high,low*growth) if low else high*.35
             try:
-                for step in range(18):
+                # Coarse grids establish scale, not the final ordering. Do not
+                # spend their whole time allowance bisecting one local basin;
+                # a consistent probe count also avoids machine speed choosing
+                # a different starting scale for the next precision stage.
+                steps=6 if large_gpu and precision<grid else 18
+                for step in range(steps):
                     monitor.check()
                     if candidate<=0:break
-                    complete=attempt(candidate,precision,step*4 if parallel else step)
+                    stage_end=monitor.stage_deadline
+                    # Finish the current large-layout probe before switching
+                    # grids. Cutting it off near the last shell throws away
+                    # seconds of useful work; the global limit/user stop still
+                    # interrupts inside every placement as before.
+                    if large_gpu:monitor.stage_deadline=None
+                    orders=(_evolved_orders(boxes,monitor.best,step+precision)
+                            if upgraded and parallel and monitor.best is not None and precision>stages[0] else None)
+                    try:complete=attempt(candidate,precision,step*4 if parallel else step,orders)
+                    finally:monitor.stage_deadline=stage_end
                     if not complete:
                         high=candidate;growing=False
                     else:
@@ -472,41 +639,102 @@ def search(boxes, triangles, areas, gap, margin, rotate, static_triangles, monit
         # shell orderings until the deadline or the user's stop, including
         # after a bisection has converged. Never replace a complete better plan
         # with an unfinished or smaller one.
-        variation=18
-        final_grid=min(8192,grid*2) if parallel and len(boxes)>=512 else grid
+        variation=18+getattr(monitor,'resume_rounds',0)*4
+        probe_scale=probe_seed=0.
+        probe_rounds=0
+        probe_area_step=.012
+        hull_order=None
+        final_grid=grid
         monitor.precision=final_grid
         while True:
             monitor.check()
-            large=parallel and len(boxes)>=512
+            large=parallel and len(boxes)>=SAMPLED_SEARCH_GROUPS
             low=monitor.best['scale'] if monitor.best is not None else 0.
             if not low:
                 candidate=upper*.2
             else:
-                growth=((.0005,.0005,.001,.002,.005) if large else
-                        (.002,.005,.01,.02,.04))[variation%5]
-                candidate=min(upper,low*(1.+growth))
+                if large and packed_area>0:
+                    # A failed order does not prove this scale cannot fit.
+                    # Reuse its exact masks for several different orders before
+                    # changing scale and rebuilding hundreds of GPU contours.
+                    if low>probe_seed or probe_rounds<=0:
+                        # Probe in atlas-area units. Push farther after a gain,
+                        # then reduce the step after several unsuccessful orders.
+                        if low>probe_seed:
+                            probe_area_step=min(.015,max(.004,probe_area_step*1.25))
+                        else:
+                            probe_area_step*=.55
+                            if probe_area_step<.00125:probe_area_step=.012
+                        added_area=monitor.target_area*probe_area_step
+                        probe_scale=min(upper,math.sqrt(low*low+added_area/packed_area))
+                        probe_seed=low;probe_rounds=4
+                    candidate=probe_scale;probe_rounds-=1
+                else:
+                    candidate=min(upper,low*(1.+(.002,.005,.01,.02,.04)[variation%5]))
             precision=final_grid
-            monitor.precision=precision
             if large and monitor.best is not None:
+                coverage=(packed_area*monitor.best['scale']**2+monitor.static_area)/monitor.target_area
+                if coverage<.64 or (coverage<.73 and variation%2):precision=min(grid,2048)
+                elif coverage>=.82 and variation%5==0:precision=min(8192,grid*2)
+            monitor.precision=precision
+            local=(upgraded and backend is not None and hasattr(backend,'fixed_group') and
+                   monitor.best is not None and monitor.best.get('precision') and variation%4==0 and
+                   monitor.local_seconds<(monitor.seconds or 30.)*.18)
+            if local:
+                seeds=[seed for seed in monitor.pool if seed.get('precision') and
+                       seed['scale']>=monitor.best['scale']*.998]
+                seed=seeds[(variation//4)%len(seeds)] if seeds else monitor.best
+                candidate=min(upper,monitor.best['scale']*(1.+(.0005,.001,.002)[(variation//4)%3]))
+                previous_deadline=monitor.stage_deadline
+                local_started=time.monotonic()
+                allowance=min(3.,max(.8,len(boxes)/600.,(monitor.seconds or 30.)*.06))
+                monitor.stage_deadline=min(monitor.deadline,local_started+allowance)
+                try:
+                    result=repair(boxes,triangles,candidate,precision,gap,margin,rotate,
+                                  static_triangles,monitor,variation,backend,seed)
+                    if result is not None:
+                        monitor.local_successes+=1
+                        monitor.consider(candidate,*result,objective=seed.get('objective',0))
+                except StageExpired:pass
+                finally:
+                    monitor.local_seconds+=time.monotonic()-local_started
+                    monitor.stage_deadline=previous_deadline
+            elif large and monitor.best is not None:
                 # Mix learned orders with fresh ones; half-cell contours reclaim
                 # raster slack around thousands of small shells without reducing
                 # the requested physical spacing or border margins.
                 orders=_evolved_orders(boxes,monitor.best,variation)
+                if variation%2==0:
+                    if hull_order is None:
+                        hull_areas=[_hull_area(shape) for shape in triangles]
+                        hull_order=sorted(range(len(boxes)),key=lambda i:(-hull_areas[i],i))
+                    orders[-1]=hull_order
                 promoted=_promote_failed(monitor,variation)
                 modes=None
                 if promoted:
                     orders[1]=promoted[0]
                     modes=[monitor.best.get('objective',0),promoted[1],0,1]
                 attempt(candidate,precision,variation,orders,modes)
-            elif (backend is not None and hasattr(backend,'fixed_group') and monitor.pool and
+            elif (not upgraded and backend is not None and hasattr(backend,'fixed_group') and monitor.pool and
                     variation%3==0):
                 seeds=[p for p in monitor.pool if p.get('precision')]
                 if seeds:
                     seed=seeds[(variation//3)%len(seeds)]
                     result=repair(boxes,triangles,candidate,grid,gap,margin,rotate,
                                   static_triangles,monitor,variation,backend,seed)
-                    if result is not None:monitor.consider(candidate,*result)
+                    if result is not None:
+                        monitor.local_successes+=1
+                        monitor.consider(candidate,*result,objective=seed.get('objective',0))
                 else:attempt(candidate,grid,variation)
+            elif upgraded and monitor.best is not None and variation%2==0:
+                # Smaller GPU batches and CPU searches also benefit from the
+                # successful order. Alternate with fresh priorities for diversity.
+                seeds=monitor.pool or [monitor.best]
+                seed=seeds[(variation//2)%len(seeds)]
+                orders=_evolved_orders(boxes,seed,variation)
+                promoted=_promote_failed(monitor,variation)
+                if promoted:orders[0]=promoted[0]
+                attempt(candidate,grid,variation,orders)
             else:attempt(candidate,grid,variation)
             variation+=1
     except StageExpired:

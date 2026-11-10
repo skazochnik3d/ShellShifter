@@ -2,6 +2,8 @@
 import json
 import math
 import weakref
+import hashlib
+import shutil
 from pathlib import Path
 from collections import defaultdict
 import maya.cmds as cmds
@@ -13,15 +15,61 @@ ORIGINAL = 'uvStraightOriginalMaterial'
 # Scene-linear greys: softer contrast than pure black/white in the viewport.
 CHECKER_DARK = (.22, .22, .22)
 CHECKER_LIGHT = (.55, .55, .55)
-STYLES = (('gray', 'Gray Squares'), ('color', 'Color Labels'))
+STYLES = (('gray', 'Gray Squares'), ('color', 'Color Labels'), ('direction', 'Direction'))
 STYLE_OPTION = 'uvStraightCheckerStyle'
 COLOR_TEXTURE = Path(__file__).resolve().parent / 'assets' / 'shellshifter_checker_color.png'
+DIRECTION_TEXTURE = Path(__file__).resolve().parent / 'assets' / 'shellshifter_checker_direction.png'
+LIBRARY_OPTION = 'uvStraightCheckerLibrary'
+TEXTURE_STYLE = 'uvStraightCheckerPattern'
+TEXTURE_CELLS = 'uvStraightCheckerCells'
 _style_listeners = globals().get('_style_listeners', [])
+
+
+def _custom_styles():
+    try:
+        records=json.loads(cmds.optionVar(query=LIBRARY_OPTION)) if cmds.optionVar(exists=LIBRARY_OPTION) else []
+        return [r for r in records if isinstance(r,dict) and isinstance(r.get('id'),str) and
+                r['id'].startswith('custom_') and isinstance(r.get('path'),str) and isinstance(r.get('label'),str)]
+    except (ValueError,TypeError):return []
+
+
+def styles():
+    return STYLES+tuple((r['id'],r['label']) for r in _custom_styles())
+
+
+def style_texture(style):
+    if style=='color':return COLOR_TEXTURE
+    if style=='direction':return DIRECTION_TEXTURE
+    return next((Path(r['path']) for r in _custom_styles() if r['id']==style),None)
+
+
+def add_texture(filename):
+    """Keep imported patterns in user prefs, outside replaceable plugin files."""
+    source=Path(filename).expanduser().resolve()
+    if not source.is_file():raise ValueError('Checker texture is missing: '+str(source))
+    try:
+        image=om.MImage();image.readFromFile(str(source))
+        if min(image.getSize())<1:raise ValueError('Empty checker texture.')
+        digest=hashlib.sha256()
+        with source.open('rb') as stream:
+            for chunk in iter(lambda:stream.read(1024*1024),b''):digest.update(chunk)
+        identifier='custom_'+digest.hexdigest()
+        existing=next((r for r in _custom_styles() if r['id']==identifier),None)
+        folder=Path(cmds.internalVar(userPrefDir=True))/'ShellShifter'/'checkers'
+        folder.mkdir(parents=True,exist_ok=True)
+        destination=folder/(digest.hexdigest()+source.suffix.lower())
+        if source!=destination:shutil.copy2(source,destination)
+        records=[r for r in _custom_styles() if r['id']!=identifier]
+        records.append(dict(id=identifier,label=existing['label'] if existing else source.stem,path=destination.as_posix()))
+        cmds.optionVar(stringValue=(LIBRARY_OPTION,json.dumps(records,ensure_ascii=False)))
+        return identifier
+    except (OSError,RuntimeError) as error:
+        raise ValueError('Cannot import checker texture: '+str(error)) from error
 
 
 def preferred_style():
     value = cmds.optionVar(query=STYLE_OPTION) if cmds.optionVar(exists=STYLE_OPTION) else 'gray'
-    return value if value in dict(STYLES) else 'gray'
+    return value if value in dict(styles()) else 'gray'
 
 
 def subscribe_style(callback):
@@ -43,10 +91,11 @@ def _remember_style(style):
 
 
 def _validate_style(style):
-    if style not in dict(STYLES):
+    if style not in dict(styles()):
         raise ValueError('Unknown checker style: ' + str(style))
-    if style == 'color' and not COLOR_TEXTURE.is_file():
-        raise ValueError('Color checker texture is missing: ' + str(COLOR_TEXTURE))
+    path=style_texture(style)
+    if style!='gray' and (path is None or not path.is_file()):
+        raise ValueError('Checker texture is missing: ' + str(path))
     return style
 
 
@@ -103,6 +152,19 @@ def _state(shape):
     return None
 
 
+def _face_components(shape, faces):
+    """Keep material assignments compact when Maya receives large face sets."""
+    from itertools import groupby
+    result=[]
+    for _,run in groupby(enumerate(sorted(set(faces))),lambda item:item[1]-item[0]):
+        _,first=next(run)
+        last=first
+        for _,last in run:pass
+        span=str(first) if first==last else '{}:{}'.format(first,last)
+        result.append('{}.f[{}]'.format(shape,span))
+    return result
+
+
 def _snapshot(shape):
     sel = om.MSelectionList()
     sel.add(shape)
@@ -123,30 +185,56 @@ def _snapshot(shape):
                             'name': name, 'faces': faces})
     return {'assignments': assignments, 'faces': fn.numPolygons,
             'displayColors': cmds.getAttr(shape + '.displayColors'),
-            'uvSet': fn.currentUVSetName()}
+            'uvSet': fn.currentUVSetName(),
+            'defaultUV': fn.getUVSetNames()[0] == fn.currentUVSetName() == 'map1'}
 
 
-def _helpers(shape):
+def _helpers(shape, group_cache=None):
     nodes = set(cmds.listConnections(shape+'.'+NODES, source=True, destination=False) or []) if cmds.attributeQuery(NODES, node=shape, exists=True) else set()
-    # Duplicate copies metadata and SG memberships, but not message connections.
+    # Duplicates may share SG memberships without copying message connections.
+    group_cache = {} if group_cache is None else group_cache
     for sg in cmds.listConnections(shape,type='shadingEngine') or []:
-        if not cmds.attributeQuery(ORIGINAL,node=sg,exists=True):
-            continue
-        nodes.add(sg)
-        for shader in cmds.listConnections(sg+'.surfaceShader',source=True,destination=False) or []:
-            nodes.add(shader)
-            for kind in ('checker', 'file'):
-                for texture in cmds.listConnections(shader+'.outColor',source=True,destination=False,type=kind) or []:
-                    nodes.add(texture)
-                    nodes.update(cmds.listConnections(texture,source=True,destination=False,type='place2dTexture') or [])
+        if sg not in group_cache:
+            graph = set()
+            if cmds.attributeQuery(ORIGINAL,node=sg,exists=True):
+                graph.add(sg)
+                for shader in cmds.listConnections(sg+'.surfaceShader',source=True,destination=False) or []:
+                    graph.add(shader)
+                    for kind in ('checker', 'file'):
+                        for texture in cmds.listConnections(shader+'.outColor',source=True,destination=False,type=kind) or []:
+                            graph.add(texture)
+                            graph.update(cmds.listConnections(texture,source=True,destination=False,type='place2dTexture') or [])
+            group_cache[sg] = graph
+        nodes.update(group_cache[sg])
     return nodes
 
 
-def _node(shape, kind):
-    nodes = [node for node in _helpers(shape) if cmds.nodeType(node)==kind]
-    if len(nodes) != 1:
-        raise ValueError('Checker helper is missing; remove the checker and apply it again.')
-    return nodes[0]
+def _preview_network(shape, cache=None):
+    """Resolve the live material graph, even when copied metadata is stale."""
+    selection = om.MSelectionList()
+    selection.add(shape)
+    path = selection.getDagPath(0)
+    shaders, _ = om.MFnMesh(path).getConnectedShaders(path.instanceNumber())
+    groups = tuple(sorted(om.MFnDependencyNode(node).name() for node in shaders))
+    if cache is not None and groups in cache:
+        return cache[groups]
+    preview_groups = [sg for sg in groups if cmds.attributeQuery(ORIGINAL, node=sg, exists=True)]
+    materials = {node for sg in preview_groups for node in
+                 (cmds.listConnections(sg+'.surfaceShader', source=True, destination=False) or [])}
+    if len(materials) == 1:
+        shader = materials.pop()
+        textures = [node for node in (cmds.listConnections(shader+'.outColor', source=True, destination=False) or [])
+                    if cmds.nodeType(node) in ('checker', 'file')]
+        if len(textures) == 1:
+            texture = textures[0]
+            places = cmds.listConnections(texture+'.uvCoord', source=True, destination=False,
+                                          type='place2dTexture') or []
+            if len(places) == 1:
+                result = shader, texture, places[0]
+                if cache is not None:
+                    cache[groups] = result
+                return result
+    raise ValueError('Checker preview is disconnected on {}. Remove Checker and apply it again.'.format(shape))
 
 
 def _tiling(value):
@@ -156,38 +244,46 @@ def _tiling(value):
     return value
 
 
-def _texture(shape):
-    shader = _node(shape, 'surfaceShader')
-    textures = cmds.listConnections(shader+'.outColor', source=True, destination=False) or []
-    textures = [node for node in textures if cmds.nodeType(node) in ('checker', 'file')]
-    if len(textures) != 1:
-        raise ValueError('Checker texture is missing; remove the checker and apply it again.')
-    return textures[0]
-
-
-def _squares_per_repeat(shape):
-    return 8. if cmds.nodeType(_texture(shape)) == 'file' else 2.
+def _texture_cells(texture):
+    if cmds.nodeType(texture) != 'file':
+        return 2.
+    return (cmds.getAttr(texture+'.'+TEXTURE_CELLS)
+            if cmds.attributeQuery(TEXTURE_CELLS,node=texture,exists=True) else 8.)
 
 
 def _current_tiles(shape):
-    return cmds.getAttr(_node(shape, 'place2dTexture')+'.repeatU') * _squares_per_repeat(shape)
+    _, texture, place = _preview_network(shape)
+    return cmds.getAttr(place+'.repeatU') * _texture_cells(texture)
 
 
 def _set_tiles(shape, tiles):
-    # Preserve the square density: gray has 2 cells, labeled image has 8.
-    place = _node(shape, 'place2dTexture')
-    repeat = tiles / _squares_per_repeat(shape)
-    cmds.setAttr(place + '.repeatU', repeat)
-    cmds.setAttr(place + '.repeatV', repeat)
+    _, texture, place = _preview_network(shape)
+    repeat = tiles / _texture_cells(texture)
+    cmds.setAttr(place+'.repeatUV', repeat, repeat, type='double2')
 
 
-def _make_texture(style, place):
-    kind = 'file' if style == 'color' else 'checker'
+def _file_spec(texture):
+    return dict(path=cmds.getAttr(texture+'.fileTextureName'),
+                cells=cmds.getAttr(texture+'.'+TEXTURE_CELLS) if cmds.attributeQuery(TEXTURE_CELLS,node=texture,exists=True) else 8.,
+                style=cmds.getAttr(texture+'.'+TEXTURE_STYLE) if cmds.attributeQuery(TEXTURE_STYLE,node=texture,exists=True) else 'color')
+
+
+def _set_file_pattern(texture,style,spec=None):
+    spec=spec or dict(path=style_texture(style).as_posix(),cells=24. if style=='direction' else 8. if style=='color' else 1.,style=style)
+    cmds.setAttr(texture+'.fileTextureName',spec['path'],type='string')
+    if not cmds.attributeQuery(TEXTURE_STYLE,node=texture,exists=True):cmds.addAttr(texture,longName=TEXTURE_STYLE,dataType='string',hidden=True)
+    if not cmds.attributeQuery(TEXTURE_CELLS,node=texture,exists=True):cmds.addAttr(texture,longName=TEXTURE_CELLS,attributeType='double',hidden=True)
+    cmds.setAttr(texture+'.'+TEXTURE_STYLE,spec['style'],type='string')
+    cmds.setAttr(texture+'.'+TEXTURE_CELLS,spec['cells'])
+
+
+def _make_texture(style, place, spec=None):
+    kind = 'checker' if style == 'gray' else 'file'
     texture = cmds.shadingNode(kind, asTexture=True, name='uvStraightCheckerTexture#')
     if style == 'gray':
         _set_palette(texture)
     else:
-        cmds.setAttr(texture+'.fileTextureName', COLOR_TEXTURE.as_posix(), type='string')
+        _set_file_pattern(texture,style,spec)
         cmds.setAttr(texture+'.colorSpace', 'sRGB', type='string')
         cmds.setAttr(texture+'.ignoreColorSpaceFileRules', True)
         # File textures require the full place2d mapping, including vertex UVs.
@@ -227,11 +323,12 @@ def _detach_network(shape):
     selection = cmds.ls(selection=True, long=True) or []
     # An upstream duplicate may traverse uvChooser into the mesh itself.
     # Copy placement values only and rebuild the small owned texture graph.
-    old_texture = _texture(shape)
-    style = 'color' if cmds.nodeType(old_texture) == 'file' else 'gray'
+    _, old_texture, old_place = _preview_network(shape)
+    spec=_file_spec(old_texture) if cmds.nodeType(old_texture)=='file' else None
+    style=spec['style'] if spec else 'gray'
     shader = cmds.shadingNode('surfaceShader', asShader=True, name='uvStraightCheckerMaterial#')
-    place = cmds.duplicate(_node(shape, 'place2dTexture'))[0]
-    texture = _make_texture(style, place)
+    place = cmds.duplicate(old_place)[0]
+    texture = _make_texture(style, place,spec)
     cmds.connectAttr(texture+'.outColor', shader+'.outColor')
     helpers = [shader, texture, place]
     snapshot = _snapshot(shape)
@@ -244,7 +341,7 @@ def _detach_network(shape):
         cmds.connectAttr(shader+'.outColor', sg+'.surfaceShader')
         cmds.addAttr(sg, longName=ORIGINAL, attributeType='message')
         cmds.connectAttr(original+'.message', sg+'.'+ORIGINAL)
-        cmds.sets(['{}.f[{}]'.format(shape, i) for i in assignment['faces']], edit=True, forceElement=sg)
+        cmds.sets(_face_components(shape,assignment['faces']), edit=True, forceElement=sg)
         helpers.append(sg)
     if cmds.attributeQuery(NODES, node=shape, exists=True):
         cmds.deleteAttr(shape+'.'+NODES)
@@ -256,13 +353,14 @@ def _detach_network(shape):
 
 
 def _switch_texture(shape, style):
-    texture = _texture(shape)
-    wanted = 'file' if style == 'color' else 'checker'
+    shader, texture, place = _preview_network(shape)
+    wanted = 'checker' if style == 'gray' else 'file'
     if cmds.nodeType(texture) == wanted:
         if style == 'gray':
             _set_palette(texture)
+        else:
+            _set_file_pattern(texture,style)
         return
-    shader, place = _node(shape, 'surfaceShader'), _node(shape, 'place2dTexture')
     replacement = _make_texture(style, place)
     cmds.connectAttr(replacement+'.outColor', shader+'.outColor', force=True)
     _link_uv_set(shape, replacement, _state(shape)['uvSet'])
@@ -289,37 +387,70 @@ def _active_preview_blend(shape):
 
 def apply(tiles=16, style=None, *, existing_only=False):
     import uv_straight as uv
+    from uv_straight_colors import finished_visible
+    show_finished = finished_visible()
     style = _validate_style(preferred_style() if style is None else style)
     if tiles is not None:
         tiles = _tiling(tiles)
     shapes = _meshes()
+    states = {shape: _state(shape) for shape in shapes}
     if existing_only:
-        shapes = [shape for shape in shapes if _state(shape) is not None]
+        shapes = [shape for shape in shapes if states[shape] is not None]
         if not shapes:
             _remember_style(style)
             return 0
-    plans = [(shape, _snapshot(shape) if _state(shape) is None else None)
+    plans = [(shape, _snapshot(shape) if states[shape] is None else None)
              for shape in shapes]
     selection = cmds.ls(selection=True, long=True) or []
+    existing_networks = defaultdict(list)
+    graph_cache = {}
+    for shape, snapshot in plans:
+        if snapshot is None:
+            existing_networks[_preview_network(shape, graph_cache)].append(shape)
+    shared_updates = {}
+    for (shader, texture, place), members in existing_networks.items():
+        # A texture type change on a non-default UV set needs per-mesh UV links.
+        same_kind = (cmds.nodeType(texture) == ('checker' if style == 'gray' else 'file'))
+        if _owns_preview(shader, members) and (same_kind or all(states[s].get('defaultUV') for s in members)):
+            representative = members[0]
+            shared_updates.update(dict.fromkeys(members, representative))
+
     with uv._undo('ShellShifter Checker'):
         try:
+            networks = {}
+            memberships = defaultdict(list)
             for shape, state in plans:
-                value = tiles if tiles is not None else (_current_tiles(shape) if state is None else 16.)
+                representative = shared_updates.get(shape)
+                value = tiles if tiles is not None else (
+                    _current_tiles(shape) if state is None and representative in (None, shape) else 16.)
                 if state is not None:
-                    shader = cmds.shadingNode('surfaceShader', asShader=True, name='uvStraightCheckerMaterial#')
-                    place = cmds.shadingNode('place2dTexture', asUtility=True, name='uvStraightCheckerPlacement#')
-                    texture = _make_texture(style, place)
-                    cmds.connectAttr(texture+'.outColor', shader+'.outColor')
-                    _link_uv_set(shape, texture, state['uvSet'])
+                    originals = tuple(sorted(item['name'] for item in state['assignments']))
+                    key = (value, originals, state['defaultUV'])
+                    if key not in networks:
+                        shader = cmds.shadingNode('surfaceShader', asShader=True, name='uvStraightCheckerMaterial#')
+                        place = cmds.shadingNode('place2dTexture', asUtility=True, name='uvStraightCheckerPlacement#')
+                        texture = _make_texture(style, place)
+                        cmds.connectAttr(texture+'.outColor', shader+'.outColor')
+                        cells = 2 if style == 'gray' else cmds.getAttr(texture+'.'+TEXTURE_CELLS)
+                        repeat = value / cells
+                        cmds.setAttr(place+'.repeatUV', repeat, repeat, type='double2')
+                        groups = {}
+                        for original in originals:
+                            sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name='uvStraightCheckerSG#')
+                            cmds.connectAttr(shader+'.outColor', sg+'.surfaceShader')
+                            cmds.addAttr(sg, longName=ORIGINAL, attributeType='message')
+                            cmds.connectAttr(original+'.message', sg+'.'+ORIGINAL)
+                            groups[original] = sg
+                        networks[key] = (texture, [shader, texture, place]+list(groups.values()), groups)
+                    texture, helpers, groups = networks[key]
+                    if not state['defaultUV']:_link_uv_set(shape, texture, state['uvSet'])
                     cmds.addAttr(shape, longName=NODES, attributeType='message', multi=True)
-                    helpers = [shader, texture, place]
                     for assignment in state['assignments']:
-                        sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name='uvStraightCheckerSG#')
-                        cmds.connectAttr(shader+'.outColor', sg+'.surfaceShader')
-                        cmds.addAttr(sg, longName=ORIGINAL, attributeType='message')
-                        cmds.connectAttr(assignment['name']+'.message', sg+'.'+ORIGINAL)
-                        cmds.sets(['{}.f[{}]'.format(shape, i) for i in assignment['faces']], edit=True, forceElement=sg)
-                        helpers.append(sg)
+                        members = memberships[groups[assignment['name']]]
+                        if len(assignment['faces']) == state['faces']:
+                            members.append(shape)
+                        else:
+                            members.extend(_face_components(shape, assignment['faces']))
                     state['format'] = 2
                     for i,node in enumerate(helpers):
                         cmds.connectAttr(node+'.message', '{}.{}[{}]'.format(shape,NODES,i))
@@ -331,17 +462,19 @@ def apply(tiles=16, style=None, *, existing_only=False):
                     else:
                         cmds.setAttr(shape+'.displayColors', True)
                         cmds.setAttr(shape+'.materialBlend', preview_blend)
-                else:
-                    if _shared_network(shape):
+                elif representative in (None, shape):
+                    if representative is None and _shared_network(shape):
                         _detach_network(shape)
                     _switch_texture(shape, style)
-                _set_tiles(shape, value)
+                    _set_tiles(shape, value)
                 if not cmds.attributeQuery('uvStraightViewportPreviewState',
                                            node=shape, exists=True):
-                    if cmds.attributeQuery('uvStraightDoneFillBackup', node=shape, exists=True):
+                    if show_finished and cmds.attributeQuery('uvStraightDoneFillBackup', node=shape, exists=True):
                         uv._done_fill(shape, True)
                     else:
                         cmds.setAttr(shape+'.displayColors', False)
+            for sg, components in memberships.items():
+                cmds.sets(components, edit=True, forceElement=sg)
         finally:
             cmds.select(selection, replace=True)
     if not cmds.about(batch=True):
@@ -364,27 +497,51 @@ def set_style(style):
     return apply(tiles=None, style=style, existing_only=True)
 
 
+def _owns_preview(shader, shapes):
+    """Include actual SG owners, even when duplicate meshes lack message links."""
+    groups = cmds.listConnections(shader+'.outColor', source=False, destination=True,
+                                  type='shadingEngine') or []
+    assigned = [member for sg in set(groups) for member in (cmds.sets(sg, query=True) or [])]
+    owners = set(cmds.ls(assigned, objectsOnly=True, long=True) or []) if assigned else set()
+    mesh_owners = set(cmds.ls(list(owners), dag=True, type='mesh', long=True,
+                              noIntermediate=True) or []) if owners else set()
+    return bool(mesh_owners) and mesh_owners <= set(shapes)
+
 def resize(tiles=None, factor=None):
     import uv_straight as uv
     shapes = [s for s in _meshes() if _state(s) is not None]
     if not shapes:
         return 0
-    plans=[]
+    networks = defaultdict(list)
+    cache = {}
     for shape in shapes:
-        current=_current_tiles(shape)
-        value=_tiling(tiles if tiles is not None else min(4096,max(1,current*factor)))
-        plans.append((shape,value))
+        networks[_preview_network(shape, cache)].append(shape)
+    plans = []
+    for (shader, texture, place), members in networks.items():
+        cells = _texture_cells(texture)
+        current = cmds.getAttr(place+'.repeatU') * cells
+        value = _tiling(tiles if tiles is not None else min(4096, max(1, current*factor)))
+        if value == current:
+            continue
+        shared_selected = _owns_preview(shader, members)
+        plans.append((members, place, value/cells, shared_selected, value))
     with uv._undo('ShellShifter Checker Tiling'):
-        for shape,value in plans:
-            if _shared_network(shape):
-                _detach_network(shape)
-            _set_tiles(shape,value)
+        for members, place, repeat, shared_selected, value in plans:
+            if shared_selected:
+                cmds.setAttr(place+'.repeatUV', repeat, repeat, type='double2')
+            else:
+                for shape in members:
+                    _detach_network(shape)
+                    _set_tiles(shape, value)
     return len(shapes)
 
 
 def remove():
     import uv_straight as uv
+    from uv_straight_colors import finished_visible
+    show_finished = finished_visible()
     plans=[]
+    original_groups = {}
     for shape in _meshes():
         state=_state(shape)
         if state is None:
@@ -401,16 +558,21 @@ def remove():
             sel=om.MSelectionList(); sel.add(shape)
             path=sel.getDagPath(0)
             shaders,indices=om.MFnMesh(path).getConnectedShaders(path.instanceNumber())
-            for index, shader in enumerate(shaders):
-                sg=om.MFnDependencyNode(shader).name()
-                if not cmds.attributeQuery(ORIGINAL,node=sg,exists=True):
-                    continue  # Preserve materials assigned manually during preview.
-                originals=cmds.listConnections(sg+'.'+ORIGINAL,source=True,destination=False) or []
-                if not originals:
-                    raise ValueError('Original material group was deleted for '+sg)
-                faces=[i for i,j in enumerate(indices) if j==index]
-                if faces:
-                    restored.append((originals[0],faces))
+            face_groups = defaultdict(list)
+            for face, index in enumerate(indices):
+                if index >= 0:
+                    face_groups[index].append(face)
+            for index, faces in face_groups.items():
+                sg = om.MFnDependencyNode(shaders[index]).name()
+                if sg not in original_groups:
+                    original_groups[sg] = None
+                    if cmds.attributeQuery(ORIGINAL, node=sg, exists=True):
+                        originals = cmds.listConnections(sg+'.'+ORIGINAL,source=True,destination=False) or []
+                        if not originals:
+                            raise ValueError('Original material group was deleted for '+sg)
+                        original_groups[sg] = originals[0]
+                if original_groups[sg]:
+                    restored.append((original_groups[sg], None if len(faces) == len(indices) else faces))
         else:
             count=cmds.polyEvaluate(shape, face=True)
             changed=count != state['faces']
@@ -430,16 +592,21 @@ def remove():
     if not plans:
         raise ValueError('No ShellShifter checker found on selected meshes. The visible checker may belong to another material or the UV Editor preview.')
     with uv._undo('ShellShifter Remove Checker'):
+        group_cache = {}
+        cleanup = {frozenset(_helpers(shape, group_cache)) for shape, _, _ in plans}
+        memberships = defaultdict(list)
+        for shape, state, assignments in plans:
+            for sg, faces in assignments:
+                memberships[sg].extend([shape] if faces is None else _face_components(shape, faces))
+        for sg, components in memberships.items():
+            cmds.sets(components, edit=True, forceElement=sg)
         for shape,state,assignments in plans:
-            nodes=_helpers(shape)
             if (state.get('format',1)<2 and len(state['assignments'])>1 and
                     cmds.polyEvaluate(shape,face=True)!=state['faces']):
                 backup=shape+'.uvStraightLegacyCheckerBackup'
                 if not cmds.objExists(backup):
                     cmds.addAttr(shape,longName='uvStraightLegacyCheckerBackup',dataType='string',hidden=True)
                 cmds.setAttr(backup,json.dumps(state),type='string')
-            for sg,faces in assignments:
-                cmds.sets(['{}.f[{}]'.format(shape,i) for i in faces],edit=True,forceElement=sg)
             preview_active = cmds.attributeQuery('uvStraightViewportPreviewState',
                                                  node=shape, exists=True)
             if preview_active:
@@ -452,17 +619,17 @@ def remove():
             for attribute in (STATE, NODES):
                 if cmds.attributeQuery(attribute, node=shape, exists=True):
                     cmds.deleteAttr(shape+'.'+attribute)
-            # Duplicated meshes may share the preview network. Keep it alive
-            # until its last owner has removed the checker.
-            shared=any(any('.'+NODES+'[' in plug for plug in
-                (cmds.listConnections(node+'.message',source=False,destination=True,plugs=True) or []))
-                for node in nodes if cmds.objExists(node))
-            shared = shared or any(cmds.sets(node,query=True) for node in nodes
+            if show_finished and cmds.attributeQuery('uvStraightDoneFillBackup',node=shape,exists=True):
+                uv._done_fill(shape, True)
+        for network in cleanup:
+            nodes = [node for node in network if cmds.objExists(node)]
+            shared = any(any('.'+NODES+'[' in plug for plug in
+                (cmds.listConnections(node+'.message', source=False, destination=True, plugs=True) or []))
+                for node in nodes)
+            shared = shared or any(cmds.sets(node, query=True) for node in nodes
                                    if cmds.nodeType(node)=='shadingEngine')
             if nodes and not shared:
-                cmds.delete(list(set(nodes)))
-            if cmds.attributeQuery('uvStraightDoneFillBackup',node=shape,exists=True):
-                uv._done_fill(shape, True)
+                cmds.delete(nodes)
     import uv_straight_native as native
     native.refresh_viewport_colors()
     return len(plans)

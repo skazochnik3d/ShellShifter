@@ -13,7 +13,7 @@ import maya.api.OpenMaya as om
 
 WINDOW = 'uvStraightQtWindowWorkspaceControl'
 PRODUCT_NAME = 'ShellShifter'
-VERSION = '1.4.237'
+VERSION = '1.4.238'
 MARK_ATTR = 'uvStraightConstraints'
 _preview = None
 _window = None
@@ -50,7 +50,8 @@ def select_uv_shell_components(components):
     cmds.select(components, replace=True)
 
 
-def _selection():
+def _selection(build_edges=True, progress=None):
+    if progress: progress('Reading selected UVs...')
     selected = cmds.ls(selection=True, long=True, flatten=True) or []
     if not selected:
         raise ValueError('Select UVs, polygon edges, faces or a mesh.')
@@ -62,7 +63,9 @@ def _selection():
         raise ValueError('The selection has no UVs in the current UV set.')
     meshes = {}
     owners = {}
-    for uv in uv_list:
+    for position, uv in enumerate(uv_list):
+        if progress and position % 1024 == 0:
+            progress('Reading UV shells...', position, len(uv_list))
         owner, index = uv.rsplit('.map[', 1)
         if owner not in owners:
             sel = om.MSelectionList()
@@ -72,7 +75,7 @@ def _selection():
                 path.extendToShape()
             key = path.fullPathName()
             if key not in meshes:
-                meshes[key] = Mesh(path)
+                meshes[key] = Mesh(path,build_edges=build_edges)
             owners[owner] = meshes[key]
         uv_id = int(index[:-1])
         owners[owner].selected.add(uv_id)
@@ -82,7 +85,7 @@ def _selection():
 
 
 class Mesh:
-    def __init__(self, path):
+    def __init__(self, path, build_edges=True):
         self.path = path
         self.name = path.fullPathName()
         self.fn = om.MFnMesh(path)
@@ -96,9 +99,22 @@ class Mesh:
         self.face_vertices = []
         self.edge_uvs = defaultdict(set)
         self.edge_faces = defaultdict(int)
+        if not build_edges:
+            # Packing needs face/UV correspondence, not pin edge topology.
+            # Read bulk arrays instead of thousands of per-corner API calls.
+            uv_counts,uv_ids=self.fn.getAssignedUVs(self.uv_set)
+            vertex_counts,vertex_ids=self.fn.getVertices()
+            uv_ids=list(uv_ids);vertex_ids=list(vertex_ids)
+            uoff=voff=0
+            for uc,vc in zip(uv_counts,vertex_counts):
+                if uc==vc and uc:
+                    self.faces.append(tuple(uv_ids[uoff:uoff+uc]))
+                    self.face_vertices.append(tuple(vertex_ids[voff:voff+vc]))
+                uoff+=uc;voff+=vc
+            return
         iterator = om.MItMeshPolygon(path)
         while not iterator.isDone():
-            edges = list(iterator.getEdges())
+            edges = list(iterator.getEdges()) if build_edges else []
             for edge in edges:
                 self.edge_faces[edge] += 1
             try:
@@ -316,17 +332,23 @@ def _border_pairs(mesh, shells):
     return {pair for pair, count in counts.items() if count == 1}
 
 
-def _auto_plan(mesh, pairs, max_deviation):
+def _auto_plan(mesh, pairs, max_deviation, axes=None, whole_shell_solve=False):
     if not pairs:
         raise ValueError('No UV contour edges found for Auto H/V.')
     groups = _auto_groups(mesh, pairs, max_deviation)
+    if axes is not None:
+        groups=[group for group in groups if group['axis'] in axes]
+    if whole_shell_solve:
+        for group in groups:group['solve_scope']='shell'
     candidate_edges = {tuple(sorted(pair)) for pair in pairs}
     old = []
     for group in _marks(mesh):
+        if axes is not None and group['axis'] not in axes:
+            old.append(group);continue
         edges = {tuple(sorted(pair)) for pair in _marked_pairs(mesh, group)}
         if not edges & candidate_edges:
             old.append(group)
-    old = [prior for prior in old if not any(
+    old = [prior for prior in old if (axes is not None and prior['axis'] not in axes) or not any(
         len(set(prior['ids']) & set(group['ids'])) > 1 for group in groups)]
     return old + groups, {i for group in groups for i in group['ids']}
 
@@ -338,11 +360,15 @@ def _apply_auto_plan(mesh, plan):
     _save_marks(mesh, groups)
 
 
-def auto_mark(max_deviation=15.0, whole_shells=False):
+def auto_mark(max_deviation=15.0, whole_shells=False, whole_shell_solve=False):
     """Assign H/V from UV contour direction without moving any UV."""
     if not 0.0 <= max_deviation <= 45.0:
         raise ValueError('Auto H/V angle must be between 0 and 45 degrees.')
-    selection, meshes = _selection()
+    from uv_straight_pin_cache import pin_selection
+    selection, meshes = pin_selection()
+    from uv_straight_pick import auto_mark_axes
+    axes=auto_mark_axes(meshes)
+    if not axes:return 0
     edge_mode = not whole_shells and all('.e[' in item for item in selection)
     plans = []
     for mesh in meshes:
@@ -371,11 +397,12 @@ def auto_mark(max_deviation=15.0, whole_shells=False):
                 pairs.update(contour)
         if not pairs:
             continue
-        plans.append((mesh, _auto_plan(mesh, pairs, max_deviation)))
+        plans.append((mesh, _auto_plan(mesh, pairs, max_deviation, axes=axes,whole_shell_solve=whole_shell_solve)))
     with _undo('ShellShifter Auto H/V'):
         for mesh, plan in plans:
             _apply_auto_plan(mesh, plan)
     count = sum(len(plan[0]) for _, plan in plans)
+    if count:show_pin_guides()
     if not count:
         cmds.warning('ShellShifter Auto H/V: no contour edges match the angle limit.')
     return count
@@ -388,6 +415,8 @@ def _mark_data(mesh):
 
 
 def _topology(mesh):
+    cached=getattr(mesh,'_pin_topology_hash',None)
+    if cached is not None:return cached  # PinMeshCache validates bulk assignments on every access.
     payload = [len(mesh.points), mesh.faces]
     return hashlib.sha256(json.dumps(payload).encode('utf-8')).hexdigest()
 
@@ -415,6 +444,11 @@ def _marked_pairs(mesh, group):
     if group.get('mode') == 'edge':
         return list(zip(ids, ids[1:]))
     selected = set(ids)
+    cached=getattr(mesh,'_pin_uv_pairs',None)
+    if cached is not None:
+        import numpy as np
+        mask=np.isin(cached[:,0],ids)&np.isin(cached[:,1],ids)
+        return [tuple(map(int,pair)) for pair in cached[mask]]
     return sorted({tuple(sorted(pair))
                    for pairs in mesh.edge_uvs.values() for pair in pairs
                    if set(pair) <= selected})
@@ -449,7 +483,8 @@ def _release_native_pins(mesh, ids):
 def mark(axis='H'):
     """Store custom directional constraints without native pins or UV movement."""
     _axis(axis)
-    selection, meshes = _selection()
+    from uv_straight_pin_cache import pin_selection
+    selection, meshes = pin_selection()
     if any('.e[' not in item and '.map[' not in item for item in selection):
         raise ValueError('Mark H/V requires only polygon edges or UVs.')
     if any('.e[' in s for s in selection) and any('.map[' in s for s in selection):
@@ -487,6 +522,14 @@ def mark(axis='H'):
             _migrate_legacy_marks(mesh)
             _release_native_pins(mesh, new_ids)
             _save_marks(mesh, groups)
+    show_pin_guides()
+
+
+def show_pin_guides():
+    """Reveal new guides even when a distortion-only manager already exists."""
+    if not cmds.about(batch=True):
+        import uv_straight_native as native
+        native.set_pins(True)
 
 
 def align_and_pin(axis='H'):
@@ -553,7 +596,8 @@ def _constraint_positions(mesh, groups, native_pins=()):
 
 def clear_marks():
     """Clear custom H/V constraints for selected meshes."""
-    _, meshes = _selection()
+    from uv_straight_pin_cache import pin_selection
+    _, meshes = pin_selection()
     with _undo('ShellShifter Clear Marks'):
         for mesh in meshes:
             _migrate_legacy_marks(mesh)
@@ -1050,31 +1094,46 @@ def _pack_unwrapped(meshes, resolution, spacing_px):
 def pack_selected_uvs(resolution=2048, spacing_px=16, margin_px=16,
                       normalize_density=True, rotate=True, method='compact',
                       around_others=True, seconds=30., precision=1024,
-                      interactive=False, keep_stacks=False, gpu=False, target_size=(1.,1.)):
+                      interactive=False, keep_stacks=False, gpu=False, target_size=(1.,1.), shape_proxies=False, spread_small=False, preserve_source=False,
+                      target_origin=(0.,0.),iteration_limit=0,base_density=500.,cpu_assist=False,refresh_transfer=None):
     """Pack existing complete selected shells without projection or unfolding."""
+    from uv_straight_material_textures import end_preview
     from uv_straight_pack import pack, prepare, apply
-    selection, meshes = _selection()
     if interactive:
-        from uv_straight_pack_progress import run
-        def commit(prepared, result, callback):
-            with _undo('ShellShifter Pack UVs'):
+        from uv_straight_pack_progress import run, preparation_progress
+        selection=[]
+        def read():
+            nonlocal selection
+            end_preview()
+            selection=cmds.ls(selection=True,long=True) or []
+            _,meshes=_selection(build_edges=False, progress=preparation_progress)
+            return prepare(meshes,resolution,spacing_px,margin_px,
+                           normalize_density,True,rotate,method,around_others,
+                           seconds,precision,keep_stacks,gpu,target_size,shape_proxies,
+                           spread_small,preserve_source,target_origin,iteration_limit,base_density,
+                           progress=preparation_progress, cpu_assist=cpu_assist)
+        def commit(prepared, result, callback, source_callback=None):
+            from uv_straight_native import uv_edit
+            with uv_edit(), _undo('ShellShifter Pack UVs'):
                 try:
-                    return apply(prepared,result,callback)
+                    return apply(prepared,result,callback,source_callback=source_callback)
                 finally:
                     cmds.select(selection,replace=True)
-        return run(lambda: prepare(meshes,resolution,spacing_px,margin_px,
-                                  normalize_density,True,rotate,method,around_others,
-                                  seconds,precision,keep_stacks,gpu,target_size),commit)
+        return run(read,commit,refresh_transfer=refresh_transfer)
+    end_preview()
+    selection,meshes=_selection(build_edges=False)
     with _undo('ShellShifter Pack UVs'):
         try:
             return pack(meshes, resolution, spacing_px, margin_px,
                         normalize_density, selected_only=True, rotate=rotate,
                         method=method, around_others=around_others,
-                        seconds=seconds, precision=precision, keep_stacks=keep_stacks,gpu=gpu,target_size=target_size)
+                        seconds=seconds, precision=precision, keep_stacks=keep_stacks,gpu=gpu,target_size=target_size,
+                        shape_proxies=shape_proxies,spread_small=spread_small,preserve_source=preserve_source,
+                        target_origin=target_origin,iteration_limit=iteration_limit,base_density=base_density,cpu_assist=cpu_assist)
         finally:
             cmds.select(selection, replace=True)
 
-def _scale_selected_shells_v(factor, label):
+def _scale_selected_shells_v(factor, label, preserve_source=False):
     """Scale complete selected shells around V=0, with one bulk Undo."""
     from uv_straight_pack_commit import commit
     _, meshes = _selection()
@@ -1105,19 +1164,22 @@ def _scale_selected_shells_v(factor, label):
         plans.append(entry)
     if plans:
         with _undo('ShellShifter ' + label):
+            if preserve_source:
+                from uv_straight_transfer_snapshot import preserve
+                preserve({'records':[(mesh,sorted(shell)) for mesh in meshes for shell in mesh.shells()]})
             commit(plans)
     return dict(shells=sum(entry['shells'] for entry in plans),
                 uvs=sum(len(entry['ids']) for entry in plans), v_scale=factor)
 
 
-def rectangle_to_square():
+def rectangle_to_square(preserve_source=False):
     """Stretch bottom-half UVs to a full tile: U unchanged, V multiplied by 2."""
-    return _scale_selected_shells_v(2.0, 'To Square')
+    return _scale_selected_shells_v(2.0, 'To Square',preserve_source)
 
 
-def square_to_rectangle():
+def square_to_rectangle(preserve_source=False):
     """Compress full-tile UVs to the bottom half: U unchanged, V multiplied by 0.5."""
-    return _scale_selected_shells_v(0.5, 'To Rectangle')
+    return _scale_selected_shells_v(0.5, 'To Rectangle',preserve_source)
 
 
 def _disk_shell(mesh, shell):
@@ -1128,7 +1190,7 @@ def _disk_shell(mesh, shell):
 
 def unwrap_from_edges(max_deviation=15.0, straighten_quads=False,
                       resolution=2048, spacing_px=40, use_u3d=True):
-    """Cut exactly selected 3D edges plus hard edges, then unwrap the mesh."""
+    """Keep existing UV seams, add selected/hard-edge cuts, then unwrap."""
     if not 0.0 <= max_deviation <= 45.0:
         raise ValueError('Auto H/V angle must be between 0 and 45 degrees.')
     if int(resolution) != resolution or not 256 <= resolution <= 8192:
@@ -1146,7 +1208,9 @@ def unwrap_from_edges(max_deviation=15.0, straighten_quads=False,
             raise ValueError('Non-manifold vertices must be repaired before automatic unwrap.')
         hard = {edge for edge in range(mesh.fn.numEdges)
                 if mesh.edge_faces[edge] == 2 and not mesh.fn.isEdgeSmooth(edge)}
-        cuts = {edge for edge in chosen | hard if mesh.edge_faces[edge] == 2}
+        seams = {edge for edge, pairs in mesh.edge_uvs.items()
+                 if mesh.edge_faces[edge] == 2 and len(pairs) > 1}
+        cuts = {edge for edge in chosen | hard | seams if mesh.edge_faces[edge] == 2}
         if not cuts and not any(count == 1 for count in mesh.edge_faces.values()):
             raise ValueError('Closed mesh has no hard-edge seams. Select edges to cut.')
         plans.append((mesh, cuts))
@@ -1314,7 +1378,7 @@ def unpin_uv_segment(mesh, pair, axis):
     return unpin_uv_segments(mesh, [pair], axis)
 
 
-def pin_uv_segments(mesh, pairs, axis=None):
+def pin_uv_segments(mesh, pairs, axis=None,*,replace_axis=False):
     """Add clicked UV edges to an H/V guide as one undoable operation."""
     pairs = {tuple(sorted(pair)) for pair in pairs}
     if not pairs:
@@ -1329,11 +1393,19 @@ def pin_uv_segments(mesh, pairs, axis=None):
         a, b = (mesh.points[index] for index in next(iter(pairs)))
         axis = 'H' if abs(b[0]-a[0]) >= abs(b[1]-a[1]) else 'V'
     _axis(axis)
-    groups = _marks(mesh)
+    original = _marks(mesh)
+    groups=[]
+    for group in original:
+        if replace_axis and group['axis']!=axis:
+            groups.extend(_trim_mark(mesh,group,set(),pairs))
+        else:groups.append(group)
     marked = {tuple(sorted(edge)) for group in groups for edge in _marked_pairs(mesh, group)}
     pairs -= marked
     if not pairs:
-        return False
+        if groups==original:return False
+        with _undo('ShellShifter Change Pin Axis'):
+            _migrate_legacy_marks(mesh);_save_marks(mesh,groups)
+        return True
     added = set(pairs)
     new_groups = [{'axis': axis, 'ids': chain, 'mode': 'edge'}
                   for chain in _chains(pairs)]
@@ -1362,20 +1434,27 @@ def pin_uv_segments(mesh, pairs, axis=None):
     return True
 
 
-def pin_uv_segment(mesh, pair, axis=None):
+def pin_uv_segment(mesh, pair, axis=None,*,replace_axis=False):
     """Add one clicked UV edge to an H/V guide without moving its UVs."""
-    return pin_uv_segments(mesh, [pair], axis)
+    return pin_uv_segments(mesh, [pair], axis,replace_axis=replace_axis)
 
 
-def unpin(whole_shell=False):
+def unpin(whole_shell=False,axes=None):
     """Remove complete guides touched by the selected UVs/components."""
-    _, meshes = _selection()
+    from uv_straight_pin_cache import pin_selection
+    if axes is not None:
+        axes=frozenset(axes)
+        if not axes<=set(('H','V')):raise ValueError('Choose H and/or V.')
+        if not axes:return
+    _, meshes = pin_selection()
     plans = []
     for mesh in meshes:
         ids = set().union(*mesh.shells()) if whole_shell else set(mesh.selected)
         groups = _marks(mesh)
-        removed = [group for group in groups if set(group['ids']) & ids]
-        kept = [group for group in groups if not set(group['ids']) & ids]
+        removed = [group for group in groups if set(group['ids']) & ids and (axes is None or group['axis'] in axes)]
+        kept = [group for group in groups if not set(group['ids']) & ids or (axes is not None and group['axis'] not in axes)]
+        if axes is not None and len(axes)<2:
+            ids={i for group in removed for i in group['ids']}
         ids.update(i for group in removed for i in group['ids'])
         # Keep shared corners pinned if a remaining constraint still owns them.
         ids -= {i for g in kept for i in g['ids']}
@@ -1430,7 +1509,8 @@ def _guided_start(mesh, shell, groups, aligned, native_pins):
 
 
 def _global_length_relax(positions, neighbors, locked, stiff_edges, anchors,
-                         anchor_weight, orientation, passes=40, groups=(), native_pins=()):
+                         anchor_weight, orientation, passes=40, groups=(), native_pins=(),
+                         adaptive=False, diagnostics=None, fixed_dimensions=()):
     """Local/global length fitting with sparse matrix-free conjugate gradients.
 
     Global solves propagate corrections along long strips in one solve instead
@@ -1456,7 +1536,7 @@ def _global_length_relax(positions, neighbors, locked, stiff_edges, anchors,
     aw = np.array([anchor_weight * (3. if locked[i] else 1.) for i in ids])
     # A guide constrains equality, not an absolute coordinate. Each transverse
     # chain shares one variable; native pins alone fix variables in place.
-    systems = []
+    systems = [];factors={}
     for dim in (0, 1):
         parents = list(range(len(ids)))
         def root(i):
@@ -1474,6 +1554,7 @@ def _global_length_relax(positions, neighbors, locked, stiff_edges, anchors,
         labels = np.array([unique[r] for r in roots])
         count = len(unique)
         mask = np.ones(count, dtype=bool)
+        if dim in fixed_dimensions:mask[:]=False
         for i in native_pins:
             mask[labels[index[i]]] = False
         # Keep compatibility for callers with no equality groups.
@@ -1485,7 +1566,13 @@ def _global_length_relax(positions, neighbors, locked, stiff_edges, anchors,
         degree = (np.bincount(labels[a[cross]], weights=weights[cross], minlength=count) +
                   np.bincount(labels[b[cross]], weights=weights[cross], minlength=count) +
                   np.bincount(labels, weights=aw, minlength=count))
-        systems.append((labels, count, mask, degree))
+        direct=None
+        if adaptive and anchor_weight>0:
+            from uv_straight_solver import direct_system
+            key=(labels.tobytes(),mask.tobytes())
+            if key not in factors:factors[key]=direct_system(labels,mask,degree,a,b,weights)
+            direct=factors[key]
+        systems.append((labels, count, mask, degree, direct))
 
     def laplacian(x):
         diff = weights * (x[a] - x[b])
@@ -1504,13 +1591,15 @@ def _global_length_relax(positions, neighbors, locked, stiff_edges, anchors,
         ac = x[tris[:, 2]] - x[tris[:, 0]]
         return signs * (ab[:, 0]*ac[:, 1] - ab[:, 1]*ac[:, 0])
 
-    for _ in range(passes):
+    span=max(float(np.ptp(p,axis=0).max()),1e-12);stable=0;completed=0
+    initial_energy=energy(p)
+    for iteration in range(passes):
         delta = p[a] - p[b]
         distance = np.linalg.norm(delta, axis=1)
         desired = delta * (lengths / np.maximum(distance, 1e-15))[:, None]
         proposal = p.copy()
         for dim in (0, 1):
-            labels, count, mask, degree = systems[dim]
+            labels, count, mask, degree, direct = systems[dim]
             def reduce(x):
                 return np.bincount(labels, weights=x, minlength=count)
             if not mask.any():
@@ -1520,6 +1609,13 @@ def _global_length_relax(positions, neighbors, locked, stiff_edges, anchors,
                    aw*target[:, dim])
             # Solve for a correction with zero entries at fixed coordinates.
             residual = reduce(rhs - laplacian(p[:, dim])) * mask
+            if direct is not None:
+                free,inverse=direct;correction=np.zeros(count)
+                correction[free]=inverse@residual[free]
+                error=reduce(laplacian(correction[labels]))*mask-residual
+                # Guard the inverse's accuracy on badly conditioned tiny maps.
+                if np.linalg.norm(error)<=max(np.linalg.norm(residual)*1e-6,1e-12):
+                    proposal[:,dim]+=correction[labels];continue
             z = residual / np.maximum(degree, 1e-15)
             direction = z.copy()
             rz = np.dot(residual, z)
@@ -1545,13 +1641,23 @@ def _global_length_relax(positions, neighbors, locked, stiff_edges, anchors,
         accepted = False
         for backtrack in range(20):
             candidate = p + (proposal-p) * (0.5**backtrack)
-            if (np.isfinite(candidate).all() and energy(candidate) <= before and
+            value=energy(candidate)
+            if (np.isfinite(candidate).all() and value <= before and
                     np.all(areas(candidate) >= floor - 1e-14)):
+                movement=float(np.max(np.abs(candidate-p)))
                 p = candidate
                 accepted = True
                 break
+        completed=iteration+1
         if not accepted:
             break
+        if adaptive and iteration>=3:
+            small=(movement<=span*2e-7 and before-value<=max(initial_energy*1e-8,span*span*1e-14))
+            stable=stable+1 if small else 0
+            if stable>=3:break
+    if diagnostics is not None:
+        diagnostics['global_passes']=completed
+        diagnostics['direct_systems']=sum(value is not None for value in factors.values())
     return {i: tuple(p[index[i]]) for i in ids}
 
 
@@ -1697,8 +1803,10 @@ def _conformal_guide_start(mesh, shell, groups, aligned, native_pins, reference=
 
 
 def _relaxed_positions(mesh, shell, groups, native_pins, iterations,
-                       anchor_weight=0.05, orientation_reference=None):
+                       anchor_weight=0.05, orientation_reference=None, prepare_only=False):
     """Fit 3D edge and quad-diagonal lengths under custom H/V constraints."""
+    axis=getattr(mesh,'relax_axis',None)
+    frozen=1-_axis(axis) if axis is not None else None
     aligned = _constraint_positions(mesh, groups, native_pins)
     locked = defaultdict(set)
     for group in groups:
@@ -1708,27 +1816,15 @@ def _relaxed_positions(mesh, shell, groups, native_pins, iterations,
     # Native pins remain full 2D anchors; H/V marks alone are directional.
     for i in native_pins:
         locked[i].update((0, 1))
+    if frozen is not None:
+        for i in shell:locked[i].add(frozen)
 
     # 3D edge lengths remain stable between presses. Using the current UV
     # lengths here would make every new Relax preserve the previous result.
-    world_lengths = {}
-    for edge, pairs in mesh.edge_uvs.items():
-        a, b = mesh.fn.getEdgeVertices(edge)
-        length = mesh.fn.getPoint(a).distanceTo(mesh.fn.getPoint(b))
-        if length > 1e-10:
-            for pair in pairs:
-                if set(pair) <= shell:
-                    world_lengths[tuple(sorted(pair))] = length
-    # Edge lengths alone cannot remove shear in a quad grid. Both diagonals
-    # constrain each quad's angles while allowing its border guides to slide.
-    for face, vertices in zip(mesh.faces, mesh.face_vertices):
-        if len(face) != 4 or not set(face) <= shell:
-            continue
-        for a, b in ((0, 2), (1, 3)):
-            length = mesh.fn.getPoint(vertices[a]).distanceTo(
-                mesh.fn.getPoint(vertices[b]))
-            if length > 1e-10:
-                world_lengths[tuple(sorted((face[a], face[b])))] = length
+    world_lengths=getattr(mesh,'metric_lengths',None)
+    if world_lengths is None:
+        from uv_straight_solver import metric_lengths
+        world_lengths=mesh.metric_lengths=metric_lengths(mesh,shell)
     ratios = [math.dist(mesh.points[a], mesh.points[b]) / length
               for (a, b), length in world_lengths.items()
               if math.dist(mesh.points[a], mesh.points[b]) > 1e-10]
@@ -1743,11 +1839,13 @@ def _relaxed_positions(mesh, shell, groups, native_pins, iterations,
             neighbors[b][a] = length
 
     start = _guided_start(mesh, shell, groups, aligned, native_pins)
-    seed = _conformal_guide_start(mesh, shell, groups, aligned, native_pins,
-                                 orientation_reference)
+    seed = (_conformal_guide_start(mesh, shell, groups, aligned, native_pins,
+                                  orientation_reference) if axis is None else None)
     if seed is not None:
         start.update(seed)
     positions = {i: list(start[i]) for i in shell}
+    if frozen is not None:
+        for i in shell:positions[i][frozen]=mesh.points[i][frozen]
     anchors = {i: tuple(positions[i]) for i in shell}
     triangles = []
     for face in mesh.faces:
@@ -1762,60 +1860,40 @@ def _relaxed_positions(mesh, shell, groups, native_pins, iterations,
         area = (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0])
         if abs(area) > 1e-12:
             orientation[triangle] = (winding, abs(area) * .01)
-    for _ in range(0 if seed is not None else max(1, int(iterations))):
-        updated = {}
-        for i in shell:
-            old = positions[i]
-            if not neighbors[i] or len(locked[i]) == 2:
-                continue
-            totals = [0.0, 0.0]
-            weight_sum = 0.0
-            for j, length in neighbors[i].items():
-                neighbor = positions[j]
-                dx, dy = old[0] - neighbor[0], old[1] - neighbor[1]
-                distance = math.hypot(dx, dy)
-                if distance < 1e-10:
-                    continue
-                weight = 100.0 if tuple(sorted((i, j))) in stiff_edges else 1.0
-                totals[0] += weight * (neighbor[0] + length * dx / distance)
-                totals[1] += weight * (neighbor[1] + length * dy / distance)
-                weight_sum += weight
-            next_position = old[:]
-            for dim in (0, 1):
-                if dim in locked[i] or not weight_sum:
-                    continue
-                # A weak anchor stops global drift without freezing the UV.
-                weight = anchor_weight * (3.0 if locked[i] else 1.0)
-                target = (totals[dim] + weight * anchors[i][dim]) / (weight_sum + weight)
-                next_position[dim] = old[dim] + 0.5 * (target - old[dim])
-            updated[i] = next_position
-        positions.update(updated)
-        # Edge lengths have mirrored solutions. A small signed-area barrier
-        # rejects local foldovers while retaining sliding degrees of freedom.
-        for triangle, (sign, minimum) in orientation.items():
-            a, b, c = triangle
-            pa, pb, pc = positions[a], positions[b], positions[c]
-            area = sign * ((pb[0]-pa[0])*(pc[1]-pa[1]) -
-                           (pb[1]-pa[1])*(pc[0]-pa[0]))
-            if area >= minimum:
-                continue
-            gradients = {a: [pb[1]-pc[1], pc[0]-pb[0]],
-                         b: [pc[1]-pa[1], pa[0]-pc[0]],
-                         c: [pa[1]-pb[1], pb[0]-pa[0]]}
-            denominator = sum(gradients[i][dim] ** 2
-                              for i in triangle for dim in (0, 1)
-                              if dim not in locked[i])
-            if denominator < 1e-16:
-                continue
-            amount = min((minimum-area) / denominator, .25)
-            for i in triangle:
-                for dim in (0, 1):
-                    if dim not in locked[i]:
-                        positions[i][dim] += .35 * amount * sign * gradients[i][dim]
+    from uv_straight_solver import warmup
+    adaptive=getattr(mesh,'adaptive_solver',False);diagnostics=getattr(mesh,'solve_stats',None)
+    if prepare_only:
+        return dict(positions=positions,neighbors=neighbors,locked=locked,stiff_edges=stiff_edges,
+                    anchors=anchors,anchor_weight=anchor_weight,orientation=orientation,
+                    iterations=0 if seed is not None else max(1,int(iterations)),
+                    scale=scale,reference=reference)
+    positions = warmup(positions, neighbors, locked, stiff_edges, anchors,
+                       anchor_weight, orientation,
+                       0 if seed is not None else max(1, int(iterations)),adaptive,diagnostics)
     result = _global_length_relax(positions, neighbors, locked, stiff_edges,
                                   anchors, anchor_weight, orientation,
-                                  groups=groups, native_pins=native_pins)
-    return _surface_relax(mesh, shell, groups, native_pins, result, scale)
+                                  groups=groups, native_pins=native_pins,
+                                  adaptive=adaptive, diagnostics=diagnostics,
+                                  fixed_dimensions=() if frozen is None else (frozen,))
+    return _finish_relaxed_positions(mesh,shell,groups,native_pins,result,scale,reference,adaptive,diagnostics)
+
+
+def _finish_relaxed_positions(mesh,shell,groups,native_pins,result,scale,reference,adaptive,diagnostics):
+    result=_surface_relax(mesh, shell, groups, native_pins, result, scale)
+    if adaptive and not groups:
+        from uv_straight_solver import preserve_orientation
+        result=preserve_orientation(result,reference,mesh.faces,diagnostics)
+    axis=getattr(mesh,'relax_axis',None)
+    if axis is not None:
+        frozen=1-_axis(axis)
+        result={i:tuple(mesh.points[i][d] if d==frozen else p[d] for d in (0,1)) for i,p in result.items()}
+    if getattr(mesh,'bridge_check',False) and diagnostics is not None:
+        import numpy as np
+        ratios=np.fromiter((math.dist(result[a],result[b])/length for (a,b),length in mesh.metric_lengths.items()),float)
+        total=float(ratios.sum())
+        fitted=float(np.dot(ratios,ratios)/total) if total>1e-30 else 0.
+        diagnostics['edge_rms']=float(np.sqrt(np.mean((ratios/fitted-1.)**2))) if fitted>0 else float('inf')
+    return result
 
 
 
@@ -1830,6 +1908,8 @@ def _surface_relax(mesh, shell, groups, native_pins, positions, scale, strain_we
     if not groups:
         return positions
     import numpy as np
+    geometry=getattr(mesh,'solver_geometry',None)
+    if geometry is None:geometry=mesh.fn.getPoints()
     ids=sorted(shell); index={i:k for k,i in enumerate(ids)}
     parents=list(range(2*len(ids)))
     def root(i):
@@ -1844,6 +1924,8 @@ def _surface_relax(mesh, shell, groups, native_pins, positions, scale, strain_we
     initial=np.array([positions[i] for i in ids]).ravel()
     x=np.bincount(labels,weights=initial,minlength=count)/np.bincount(labels,minlength=count)
     fixed={labels[2*index[i]+dim] for i in native_pins for dim in (0,1)}
+    axis=getattr(mesh,'relax_axis',None)
+    if axis is not None:fixed.update(labels[2*index[i]+1-_axis(axis)] for i in ids)
     free=np.array([i for i in range(count) if i not in fixed],dtype=int)
     if not len(free): return positions
     triangles=[]; inverses=[]; weights=[]
@@ -1852,7 +1934,7 @@ def _surface_relax(mesh, shell, groups, native_pins, positions, scale, strain_we
         if not set(face)<=shell: continue
         for j in range(1,len(face)-1):
             corners=(0,j,j+1)
-            a,b,c=[mesh.fn.getPoint(vertices[k]) for k in corners]
+            a,b,c=[geometry[vertices[k]] for k in corners]
             ab,ac=b-a,c-a; length=ab.length()
             if length<1e-12: continue
             tx=(ab*ac)/length; ty=math.sqrt(max(0.,ac.length()**2-tx*tx))
@@ -1865,7 +1947,7 @@ def _surface_relax(mesh, shell, groups, native_pins, positions, scale, strain_we
     strain_edges=[]
     for edge,pairs in mesh.edge_uvs.items():
         a,b=mesh.fn.getEdgeVertices(edge)
-        length=mesh.fn.getPoint(a).distanceTo(mesh.fn.getPoint(b))*scale
+        length=geometry[a].distanceTo(geometry[b])*scale
         if length>1e-12:
             strain_edges.extend((index[i],index[j],length) for i,j in pairs if {i,j}<=shell)
     ea=np.array([e[0] for e in strain_edges]);eb=np.array([e[1] for e in strain_edges])
@@ -1944,7 +2026,7 @@ def _surface_relax(mesh, shell, groups, native_pins, positions, scale, strain_we
     return result
 
 
-def _maya_relax_bridge(mesh, shell, pin_positions, iterations=10):
+def _maya_relax_bridge(mesh, shell, pin_positions, iterations=10,pin_unselected=False):
     """Use Maya's legacy Relax to escape a poor local custom-solver state.
 
     H/V marks are metadata, so the final custom pass can restore them exactly.
@@ -1953,7 +2035,7 @@ def _maya_relax_bridge(mesh, shell, pin_positions, iterations=10):
     """
     try:
         cmds.untangleUV(mesh.components(shell), relax='harmonic', pinBorder=True,
-                        pinSelected=False, pinUnselected=False,
+                        pinSelected=False, pinUnselected=pin_unselected,
                         maxRelaxIterations=max(1, int(iterations)))
     except RuntimeError as error:
         cmds.warning('ShellShifter: Maya Relax bridge skipped: {}'.format(error))
@@ -1962,61 +2044,71 @@ def _maya_relax_bridge(mesh, shell, pin_positions, iterations=10):
             Mesh(mesh.path).write(pin_positions)
 
 
-def _solve_tasks(tasks, iterations, anchor_weight, relax_bridge=False):
+def _solve_tasks(tasks, iterations, anchor_weight, relax_bridge=False, snapshots=None, axis=None):
     """Solve prepared shells without opening an undo chunk or changing selection."""
-    if relax_bridge:
-        # A shorter first pass gives legacy Relax a correctly oriented
-        # starting shape. The final full pass restores precise guides.
-        first_iterations = min(100, max(20, int(iterations) // 3))
-        for path, shell, groups, pins, _, _ in tasks:
-            mesh = Mesh(path)
-            mesh.write(_relaxed_positions(mesh, shell, groups, pins,
-                                          first_iterations, anchor_weight))
-        bridge_iterations = max(5, min(20, int(iterations) // 20))
-        for path, shell, _, _, pin_positions, _ in tasks:
-            _maya_relax_bridge(Mesh(path), shell, pin_positions,
-                               bridge_iterations)
-
-    for path, shell, groups, pins, pin_positions, reference in tasks:
-        mesh = Mesh(path)
-        # Restore anchors before reading targets for the final solve.
-        if pin_positions:
-            mesh.write(pin_positions)
-            mesh = Mesh(path)
-        mesh.write(_relaxed_positions(mesh, shell, groups, pins,
-                                      iterations, anchor_weight, reference))
+    from uv_straight_solver import solve_tasks
+    solve_tasks(tasks, iterations, anchor_weight, relax_bridge,snapshots,axis)
 
 
-def _solve_selected_shells(iterations, anchor_weight, label, relax_bridge=False):
+def _solve_selected_shells(iterations, anchor_weight, label, relax_bridge=False, axis=None):
     selection, meshes = _selection()
-    with _undo(label):
+    unique={}
+    for mesh in meshes:
+        key=(om.MObjectHandle(mesh.fn.object()).hashCode(),mesh.uv_set)
+        if key in unique:unique[key].selected.update(mesh.selected)
+        else:unique[key]=mesh
+    meshes=list(unique.values())
+    from uv_straight_native import uv_edit
+    with uv_edit(), _undo(label):
         try:
             tasks = []
             for mesh in meshes:
                 _migrate_legacy_marks(mesh)
                 groups = _marks(mesh)
-                for shell in mesh.shells():
+                shells = mesh.shells()
+                all_pins = mesh.pins(set().union(*shells)) if shells else set()
+                for shell in shells:
                     relevant = [g for g in groups if set(g['ids']) & shell]
-                    pins = mesh.pins(shell)
-                    tasks.append((mesh.path, set(shell), relevant, pins,
-                                  {i: mesh.points[i] for i in pins},
-                                  {i: mesh.points[i] for i in shell}))
-            _solve_tasks(tasks, iterations, anchor_weight, relax_bridge)
+                    # Shift-wheel guides describe a whole contour. A selected
+                    # UV identifies that shell rather than limiting its solve.
+                    whole_shell=any(g.get('solve_scope')=='shell' for g in relevant)
+                    unselected = set() if whole_shell else shell-mesh.selected
+                    if axis is not None:
+                        # Guides in the moving direction constrain the frozen
+                        # coordinate, which now stays at each original value.
+                        relevant=[g for g in relevant if g['axis']!=axis]
+                    if unselected:
+                        # Clip only this solve's guides; stored guides are unchanged.
+                        selected = shell & mesh.selected
+                        relevant = [part for group in relevant
+                                    for part in _trim_mark(mesh,group,set(group['ids'])-selected)]
+                    pins = (all_pins & shell)|unselected
+                    job = (mesh.path, set(shell), relevant, pins,
+                           {i: mesh.points[i] for i in pins},
+                           {i: mesh.points[i] for i in shell})
+                    tasks.append(job+(unselected,) if unselected else job)
+            _solve_tasks(tasks,iterations,anchor_weight,relax_bridge,{m.name:m for m in meshes},axis)
         finally:
             cmds.select(selection, replace=True)
 
 
 def relax(iterations=100):
-    """Reduce distortion with the custom orientation-safe solver."""
+    """Relax selected UVs, or whole touched shells carrying Shift-wheel guides."""
     _solve_selected_shells(iterations, 0.05, 'ShellShifter Relax')
 
 
+def relax_axis(axis,iterations=100):
+    """Relax selected UVs along U (H) or V, fixing the other coordinate."""
+    if axis not in ('H','V'):raise ValueError('Relax axis must be H or V.')
+    _solve_selected_shells(iterations,.05,'ShellShifter Relax '+axis,axis=axis)
+
+
 def unfold(iterations=350):
-    """Custom solve, legacy Maya Relax bridge, then precise custom solve."""
+    """Unfold selected UVs, expanding shells carrying Shift-wheel guides."""
     _solve_selected_shells(iterations, 0.005, 'ShellShifter Unfold', True)
 
 
-def _done_fill(shape, enabled):
+def _done_fill(shape, enabled, *, keep_mark=False):
     import uv_straight_colors as display_colors
     plug = shape + '.uvStraightDoneFillBackup'
     exists = cmds.objExists(plug)
@@ -2024,15 +2116,15 @@ def _done_fill(shape, enabled):
     attrs = ('displayColors', 'materialBlend', 'displayColorChannel',
              'displayColorAsGreyScale', 'displayRedColorChannel',
              'displayGreenColorChannel', 'displayBlueColorChannel')
+    if exists:
+        state = json.loads(cmds.getAttr(plug))
+    elif enabled or keep_mark:
+        state = {a: cmds.getAttr(shape + '.' + a) for a in attrs}
+        state['current'] = (cmds.polyColorSet(shape, query=True, currentColorSet=True) or [None])[0]
+        state['set'] = 'uvStraightDone_' + uuid.uuid4().hex[:12]
+        cmds.addAttr(shape, longName='uvStraightDoneFillBackup', dataType='string', hidden=True)
+        cmds.setAttr(plug, json.dumps(state), type='string')
     if enabled:
-        if not exists:
-            state = {a: cmds.getAttr(shape + '.' + a) for a in attrs}
-            state['current'] = (cmds.polyColorSet(shape, query=True, currentColorSet=True) or [None])[0]
-            state['set'] = 'uvStraightDone_' + uuid.uuid4().hex[:12]
-            cmds.addAttr(shape, longName='uvStraightDoneFillBackup', dataType='string', hidden=True)
-            cmds.setAttr(plug, json.dumps(state), type='string')
-        else:
-            state = json.loads(cmds.getAttr(plug))
         if state['set'] not in sets:
             cmds.polyColorSet(shape, create=True, colorSet=state['set'], representation='RGBA')
         cmds.polyColorSet(shape, currentColorSet=True, colorSet=state['set'])
@@ -2046,7 +2138,6 @@ def _done_fill(shape, enabled):
         for channel in ('Red', 'Green', 'Blue'):
             cmds.setAttr(shape + '.display' + channel + 'ColorChannel', True)
     elif exists:
-        state = json.loads(cmds.getAttr(plug))
         if state['set'] in sets:
             cmds.polyColorSet(shape, delete=True, colorSet=state['set'])
         if state['current'] in sets and state['current'] != state['set']:
@@ -2057,6 +2148,34 @@ def _done_fill(shape, enabled):
                 cmds.setAttr(shape + '.' + a, value, type='string')
             else:
                 cmds.setAttr(shape + '.' + a, value)
+        if not keep_mark:
+            cmds.deleteAttr(plug)
+
+
+def _done_outline(node, visible, keep_mark):
+    attr = 'uvStraightDoneDisplayBackup'
+    plug = node + '.' + attr
+    rgb = (.18, .85, .3)
+    values = ({'useObjectColor': 2, 'wireColorRGB': rgb} if cmds.nodeType(node) == 'mesh'
+              else {'useOutlinerColor': True, 'outlinerColor': rgb})
+    if cmds.objExists(plug):
+        original = json.loads(cmds.getAttr(plug))
+    elif keep_mark:
+        original = {key: cmds.getAttr(node + '.' + key) for key in values}
+        cmds.addAttr(node, longName=attr, dataType='string', hidden=True)
+        cmds.setAttr(plug, json.dumps(original), type='string')
+        if not visible:
+            return
+    else:
+        return
+    for key, value in (values if visible else original).items():
+        if isinstance(value, (list, tuple)):
+            if len(value) == 1 and isinstance(value[0], (list, tuple)):
+                value = value[0]
+            cmds.setAttr(node + '.' + key, *value, type='double3')
+        else:
+            cmds.setAttr(node + '.' + key, value)
+    if not keep_mark:
         cmds.deleteAttr(plug)
 
 
@@ -2064,6 +2183,8 @@ def restore_done_colors():
     """Repair persisted completion markers once, without idle polling."""
     repaired = 0
     import uv_straight_colors as display_colors
+    if not display_colors.finished_visible():
+        return repaired
     shapes = cmds.ls('*.uvStraightDoneFillBackup', objectsOnly=True, long=True) or []
     with _undo('ShellShifter Restore Done Colors'):
         for shape in shapes:
@@ -2100,6 +2221,41 @@ def restore_done_colors():
     return repaired
 
 
+def set_finished_unwrap_visible(visible):
+    """Toggle completion colors for this scene, retaining completion marks."""
+    import uv_straight_checker as checker
+    import uv_straight_colors as colors
+    import uv_straight_native as native
+    visible = bool(visible)
+    if visible == colors.finished_visible():
+        return
+    shapes = cmds.ls('*.uvStraightDoneFillBackup', objectsOnly=True, long=True, type='mesh') or []
+    outlines = cmds.ls('*.uvStraightDoneDisplayBackup', objectsOnly=True, long=True) or []
+    with native.uv_edit():
+        if shapes:
+            native.restore_viewport_colors(only=shapes)
+        with _undo('ShellShifter Finished Unwrap Meshes'):
+            if not cmds.objExists(colors.FINISHED_DISPLAY_PLUG):
+                if cmds.objExists(colors.FINISHED_DISPLAY_NODE):
+                    raise ValueError('The ShellShifter display settings name is already in use.')
+                node = cmds.createNode('network', name=colors.FINISHED_DISPLAY_NODE, skipSelect=True)
+                cmds.addAttr(node, longName=colors.FINISHED_DISPLAY_ATTR,
+                             attributeType='bool', defaultValue=True, hidden=True)
+            cmds.setAttr(colors.FINISHED_DISPLAY_PLUG, visible)
+            for shape in shapes:
+                _done_fill(shape, visible, keep_mark=True)
+                if not visible:
+                    checker_state = checker._state(shape)
+                    if checker_state is not None:
+                        checker_state['displayColors'] = cmds.getAttr(shape + '.displayColors')
+                        cmds.setAttr(shape + '.' + checker.STATE, json.dumps(checker_state), type='string')
+                        cmds.setAttr(shape + '.displayColors', False)
+            for node in outlines:
+                _done_outline(node, visible, keep_mark=True)
+    native.refresh_viewport_colors()
+    native._notify_display()
+
+
 def mark_done(enabled=True):
     """Persistent manual completion mark; restore original display on removal."""
     selected = cmds.ls(selection=True, long=True, objectsOnly=True) or []
@@ -2114,50 +2270,32 @@ def mark_done(enabled=True):
     if not shapes:
         raise ValueError('Select meshes or their components to mark as finished.')
     transforms = {cmds.listRelatives(s, parent=True, fullPath=True)[0] for s in shapes}
-    # Store on each affected node, so rename/save/reopen cannot break restoration.
-    plans = [(node, {'useOutlinerColor': True, 'outlinerColor': (.18, .85, .3)})
-             for node in sorted(transforms)]
-    plans += [(node, {'useObjectColor': 2, 'wireColorRGB': (.18, .85, .3)})
-              for node in sorted(shapes)]
-    attr = 'uvStraightDoneDisplayBackup'
+    from uv_straight_colors import finished_visible
+    visible = enabled and finished_visible()
     import uv_straight_native as native
+    import uv_straight_move_overlaps as overlaps
+    cleared_original_color = False
     if any(cmds.attributeQuery('uvStraightViewportPreviewState', node=shape, exists=True)
            for shape in shapes):
         # Back up the underlying display, never a temporary distortion set.
         native.restore_viewport_colors(only=shapes)
     with _undo('ShellShifter Mark Done' if enabled else 'ShellShifter Clear Done'):
+        if not enabled:
+            cleared_original_color = overlaps.hide_original_colors(shapes)
         for shape in sorted(shapes):
             import uv_straight_checker as checker
             checker_state = checker._state(shape)
             if checker_state is not None:
                 cmds.setAttr(shape+'.displayColors',checker_state['displayColors'])
-            _done_fill(shape, enabled)
+            _done_fill(shape, visible, keep_mark=enabled)
             if checker_state is not None:
                 checker_state['displayColors']=cmds.getAttr(shape+'.displayColors')
                 cmds.setAttr(shape+'.'+checker.STATE,json.dumps(checker_state),type='string')
-                cmds.setAttr(shape+'.displayColors',bool(enabled))
-        for node, values in plans:
-            plug = node + '.' + attr
-            exists = cmds.attributeQuery(attr, node=node, exists=True)
-            if enabled:
-                if not exists:
-                    original = {key: cmds.getAttr(node + '.' + key) for key in values}
-                    cmds.addAttr(node, longName=attr, dataType='string', hidden=True)
-                    cmds.setAttr(plug, json.dumps(original), type='string')
-                target = values
-            else:
-                if not exists:
-                    continue
-                target = json.loads(cmds.getAttr(plug))
-            for key, value in target.items():
-                if isinstance(value, (list, tuple)):
-                    if len(value) == 1 and isinstance(value[0], (list, tuple)):
-                        value = value[0]
-                    cmds.setAttr(node + '.' + key, *value, type='double3')
-                else:
-                    cmds.setAttr(node + '.' + key, value)
-            if not enabled:
-                cmds.deleteAttr(plug)
+                cmds.setAttr(shape+'.displayColors', visible)
+        for node in sorted(transforms | shapes):
+            _done_outline(node, visible, keep_mark=enabled)
+    if cleared_original_color:
+        overlaps.refresh_original_colors(only_if_active=True)
     native.refresh_viewport_colors()
     return len(shapes)
 
@@ -2180,14 +2318,26 @@ def reload_tool():
     progress = sys.modules.get('uv_straight_pack_progress')
     if progress is not None and progress.is_running():
         raise ValueError('Stop the packing search before reloading ShellShifter.')
+    transfer = sys.modules.get('uv_straight_transfer_ui')
+    if transfer is not None and transfer.is_running():
+        raise ValueError('Stop texture transfer before reloading ShellShifter.')
+    target = sys.modules.get('uv_straight_pack_target')
+    if target is not None and target.active is not None:
+        # Restore the selection/tool before replacing the Qt picker classes.
+        target.active.cleanup(None, True)
     import uv_straight_native as native
     from uv_straight_preview import QtWidgets
     import uv_straight_menu
+    importlib.reload(uv_straight_menu)
     uv_straight_menu.uninstall()
     enabled = native._manager is not None
     texel_ui = sys.modules.get('uv_straight_texel_ui')
     if texel_ui is not None:
         texel_ui.stop_display()
+    groups_ui=sys.modules.get('uv_straight_groups_ui')
+    if groups_ui is not None:groups_ui.stop_display()
+    group_visibility=sys.modules.get('uv_straight_group_visibility')
+    if group_visibility is not None:group_visibility.stop()
     native.disable()
     for widget in QtWidgets.QApplication.allWidgets():
         if widget.objectName() not in ('uvStraightQtWindow', 'uvStraightQtPopup'):
@@ -2218,25 +2368,43 @@ def reload_tool():
         controller = getattr(widget, 'uv_sets', None)
         if controller is not None:
             controller.stop()
+        controller = getattr(widget, 'texture_transfer', None)
+        if controller is not None:controller.stop()
         if widget.objectName() == 'uvStraightQtPopup':
             widget.close()
     import uv_straight_preview
     uv_straight_preview._popup = None
+    texture_reload = sys.modules.get('uv_straight_texture_reload')
+    if texture_reload is not None:
+        texture_reload.stop()
+    solver_gpu=sys.modules.get('uv_straight_solver_gpu')
+    if solver_gpu is not None:solver_gpu.close()
+    pack_cache=sys.modules.get('uv_straight_pack_cache')
+    if pack_cache is not None:pack_cache.close()
     # Keep the registered VP2 provider and shared draw-state module alive.
     # Unloading it while a model editor owns draw data is unsafe.
-    for name in ('uv_straight_actions', 'uv_straight_icons', 'uv_straight_custom_keymaps', 'uv_straight_pie',
+    for name in ('uv_straight_transfer_errors','uv_straight_transfer_models','uv_straight_transfer_codec',
+                 'uv_straight_transfer_basis','uv_straight_transfer_padding','uv_straight_transfer_udim',
+                 'uv_straight_transfer_images','uv_straight_transfer_raster','uv_straight_transfer_graph',
+                 'uv_straight_transfer_snapshot','uv_straight_transfer','uv_straight_transfer_ui', 'uv_straight_transfer_direct', 'uv_straight_transfer_direct_ui',
+                 'uv_straight_move_overlaps', 'uv_straight_actions', 'uv_straight_icons', 'uv_straight_custom_keymaps', 'uv_straight_pie',
                  'uv_straight_section_drag',
                  'uv_straight_pie_drag', 'uv_straight_pie_catalog', 'uv_straight_pie_preview',
                  'uv_straight_pie_popup',
                  'uv_straight_uv_set_tags', 'uv_straight_changes',
-                 'uv_straight_distortion', 'uv_straight_pack_area', 'uv_straight_pack_stacks', 'uv_straight_pack_search', 'uv_straight_contour_pack',
-                 'uv_straight_pack_kernels', 'uv_straight_pack_gpu', 'uv_straight_pack_commit', 'uv_straight_pack', 'uv_straight_pack_progress', 'uv_straight_pack_ui', 'uv_straight_colors', 'uv_straight_checker',
+                 'uv_straight_groups','uv_straight_group_visibility','uv_straight_groups_ui','uv_straight_pack_groups',
+                 'uv_straight_distortion', 'uv_straight_pack_area', 'uv_straight_pack_stacks', 'uv_straight_pack_search', 'uv_straight_pack_shapes', 'uv_straight_pack_refine', 'uv_straight_pack_metrics', 'uv_straight_pack_spread', 'uv_straight_contour_pack',
+                 'uv_straight_pack_kernels', 'uv_straight_pack_tabi', 'uv_straight_pack_gpu',
+                 # Rebuild the transfer subclass after its OpenCL base class,
+                 # and replace its kernels together with the Python interface.
+                 'uv_straight_transfer_kernels', 'uv_straight_transfer_gpu',
+                 'uv_straight_pack_cache', 'uv_straight_pack_prepare', 'uv_straight_pack_cpu', 'uv_straight_pack_commit', 'uv_straight_pack', 'uv_straight_pack_progress', 'uv_straight_pack_target', 'uv_straight_pack_ui', 'uv_straight_colors', 'uv_straight_checker',
                  'uv_straight_raster', 'uv_straight_overlay',
                  'uv_straight_live_preview', 'uv_straight_texel', 'uv_straight_texel_ui', 'uv_straight_uv_seams', 'uv_straight_error_checks',
-                 'uv_straight_materials', 'uv_straight_material_groups', 'uv_straight_material_ui',
+                 'uv_straight_materials', 'uv_straight_material_groups', 'uv_straight_material_textures', 'uv_straight_texture_reload', 'uv_straight_texture_match', 'uv_straight_texture_import_ui', 'uv_straight_material_texture_ui', 'uv_straight_material_ui',
                  'uv_straight_overlap_quality', 'uv_straight_check_ui',
-                 'uv_straight_stack', 'uv_straight_stack_ui', 'uv_straight_unwrap', 'uv_straight_ribbon', 'uv_straight_qt_native',
-                 'uv_straight_native'):
+                 'uv_straight_shell_match', 'uv_straight_stack', 'uv_straight_stack_ui', 'uv_straight_solver_kernels', 'uv_straight_solver_gpu', 'uv_straight_solver_stacks', 'uv_straight_solver', 'uv_straight_unfold_bridge', 'uv_straight_unwrap', 'uv_straight_ribbon', 'uv_straight_pin_cache', 'uv_straight_qt_native',
+                 'uv_straight_native','uv_straight_match_transfer','uv_straight_match_ui'):
         if name in sys.modules:
             importlib.reload(sys.modules[name])
     if enabled:
@@ -2262,15 +2430,14 @@ def show():
     import uv_straight_checker
     importlib.reload(uv_straight_checker)
     uv_straight_checker.refresh_palette()
+    import uv_straight_menu
+    # Keep the startup Tools hook alive while the palette is opened or rebuilt.
+    uv_straight_menu.install()
     importlib.reload(uv_straight_preview)
     _window = uv_straight_preview.show_window()
     _preview = None
     import install_shellshifter
     install_shellshifter.rename_existing_buttons()
-    import uv_straight_menu
-    uv_straight_menu.uninstall()
-    importlib.reload(uv_straight_menu)
-    uv_straight_menu.install()
 
 
 if __name__ == '__main__':

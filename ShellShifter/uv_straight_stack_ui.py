@@ -13,8 +13,9 @@ class Signals(QtCore.QObject):
 
 
 class Ticket:
-    def __init__(self,records,signals):
+    def __init__(self,records,signals,sources=None):
         self.records,self.signals=records,signals
+        self.sources=sources
         self.cancelled=threading.Event()
         self.plan,self.error=None,''
 
@@ -24,7 +25,9 @@ class MatchTask(QtCore.QRunnable):
         super().__init__();self.ticket=ticket
 
     def run(self):
-        ticket=self.ticket;steps=stack.analyse_steps(ticket.records);last=0.
+        ticket=self.ticket
+        steps=(stack.analyse_steps(ticket.records) if ticket.sources is None else
+               stack.match_selected_steps(ticket.records,ticket.sources));last=0.
         try:
             while not ticket.cancelled.is_set():
                 progress=next(steps);now=time.perf_counter()
@@ -41,20 +44,21 @@ class MatchTask(QtCore.QRunnable):
 
 
 class StackController(QtCore.QObject):
-    def __init__(self,window,layout):
+    TITLE='Stack Shells'
+    PRESERVE_PLACEMENT=False
+
+    def __init__(self,window,layout,button_layout=None):
         super().__init__(window)
         self.window,self.prepared,self.ticket=window,None,None
         self.signals=Signals(self)
         self.signals.progress.connect(self.progress,QtCore.Qt.QueuedConnection)
         self.signals.finished.connect(self.finished,QtCore.Qt.QueuedConnection)
-        self.button=ActionButton('Stack Similar Shells','stack')
+        self.button=ActionButton(self.TITLE,'stack')
         self.button.setObjectName('stackSimilarShells')
-        self.button.setToolTip('Stack selected shells with matching surface geometry and topology.\n'
-                               'The least distorted shell is the template; all corresponding UV points are aligned.\n'
-                               'Only current UV sets change. Click again to stop matching.')
+        self.button.setToolTip('Stack selected shells with matching topology and similar geometry.\nThe least distorted shell is the reference for the UV alignment.\nOnly current UV sets change. Click again to stop the search.')
         self.button.setFixedHeight(28)
         self.button.clicked.connect(self.start_or_cancel)
-        layout.addWidget(self.button)
+        (layout if button_layout is None else button_layout).addWidget(self.button)
         self.status=ResultLabel();self.status.setObjectName('stackShellsResult')
         layout.addWidget(self.status)
         window.installEventFilter(self)
@@ -74,7 +78,7 @@ class StackController(QtCore.QObject):
         if self.ticket is not None:
             self.ticket.cancelled.set()
         self.ticket,self.prepared=None,None
-        try:self.button.setText('Stack Similar Shells')
+        try:self.button.setText(self.TITLE)
         except RuntimeError:pass
 
     def start_or_cancel(self):
@@ -82,13 +86,17 @@ class StackController(QtCore.QObject):
             self.stop();self.status.setText('Stacking stopped. UVs were not changed.')
             return
         try:
-            self.prepared=stack.prepare()
-            self.ticket=Ticket(self.prepared['records'],self.signals)
+            self.prepared=self.prepare()
+            if self.prepared is None:return
+            self.ticket=Ticket(self.prepared['records'],self.signals,self.prepared.get('sources'))
             self.button.setText('Stop Stacking')
             self.status.setText('Matching {} selected shells…'.format(len(self.ticket.records)))
             QtCore.QThreadPool.globalInstance().start(MatchTask(self.ticket))
         except Exception as error:
             self.stop();self.status.setText(str(error))
+
+    def prepare(self):
+        return stack.prepare()
 
     def progress(self,ticket,progress):
         if ticket is self.ticket:
@@ -99,15 +107,15 @@ class StackController(QtCore.QObject):
             return
         prepared=self.prepared
         self.ticket,self.prepared=None,None
-        self.button.setText('Stack Similar Shells')
+        self.button.setText(self.TITLE)
         try:
             if ticket.error:raise ValueError(ticket.error)
             if ticket.plan is None:raise ValueError('Stacking did not finish.')
-            result=stack.apply(prepared,ticket.plan)
+            result=stack.apply(prepared,ticket.plan,preserve_placement=self.PRESERVE_PLACEMENT)
             if not result['groups']:
                 text='No matching shells found in the selection.'
             else:
-                text='Stacked {} shell{} in {} group{}.'.format(result['stacked'],'' if result['stacked']==1 else 's',
+                text=('Matched' if self.PRESERVE_PLACEMENT else 'Stacked')+' {} shell{} in {} group{}.'.format(result['stacked'],'' if result['stacked']==1 else 's',
                        result['groups'],'' if result['groups']==1 else 's')
             if result['unmatched']:
                 text+=' Unmatched: {}.'.format(result['unmatched'])

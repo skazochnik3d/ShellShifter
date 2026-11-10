@@ -52,6 +52,8 @@ class Result:
 
 
 def matches(name, filters):
+    # Transfer sources belong to the saved texture baseline, not UV candidates.
+    if name.startswith('SS_Transfer_Source'):return False
     patterns = [part.strip() for part in re.split('[,;]', filters) if part.strip()]
     return name != 'map1' and any(fnmatch.fnmatchcase(name, pattern) for pattern in (patterns or ['*']))
 

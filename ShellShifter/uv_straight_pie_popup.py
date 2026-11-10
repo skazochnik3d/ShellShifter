@@ -4,6 +4,31 @@ from PySide6 import QtCore, QtGui, QtWidgets
 import maya.cmds as cmds
 from uv_straight_pie_preview import NativePieCanvas
 import uv_straight_pie as pie
+from uv_straight_actions import tooltip_label
+
+
+class RotationAngleEditor(QtWidgets.QDoubleSpinBox):
+    """Keyboard input stays inside the marking popup's existing Qt window."""
+    def __init__(self,popup):
+        super().__init__(popup.canvas)
+        self.popup=popup
+        self.setObjectName('pieRotationAngleEditor')
+        self.setRange(0.,360.);self.setDecimals(1);self.setSingleStep(15.)
+        self.setSuffix('°');self.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        self.setAlignment(QtCore.Qt.AlignCenter);self.setKeyboardTracking(False)
+        self.setFont(popup.canvas.menu_font())
+        self.setStyleSheet('QDoubleSpinBox { background: #494949; color: #eef2f6; '
+                           'border: 1px solid #85bbdd; border-radius: 9px; padding: 0; }')
+        self.editingFinished.connect(popup.finish_angle_edit)
+
+    def textFromValue(self,value):
+        text=self.locale().toString(value,'f',self.decimals())
+        return text.rstrip('0').rstrip(self.locale().decimalPoint())
+
+    def keyPressEvent(self,event):
+        if event.key() in (QtCore.Qt.Key_Return,QtCore.Qt.Key_Enter):
+            self.interpretText();self.popup.finish_angle_edit();event.accept();return
+        super().keyPressEvent(event)
 
 
 class RuntimePieCanvas(NativePieCanvas):
@@ -157,6 +182,10 @@ class PiePopup(QtWidgets.QWidget):
         self.button = button
         self.holding = True
         self.executed = False
+        self.angle_editor=None
+        self.finishing_angle=False
+        self.ignore_trigger_release=False
+        self.angle_press_pending=False
         self.submenu_id = None
         self.pages = []
         self.hover_id = None
@@ -200,6 +229,8 @@ class PiePopup(QtWidgets.QWidget):
         self.transition_cursor = None
         self.pages = [dict(owner=None, center=QtCore.QPoint(global_point))]
         self.canvas.refresh()
+        from uv_straight_language import apply
+        apply(self)
         self.position_page()
         self.show()
         self.pages[0]['center'] = self.canvas.mapToGlobal(self.canvas.pie_center.toPoint())
@@ -278,8 +309,15 @@ class PiePopup(QtWidgets.QWidget):
         if kind in (QtCore.QEvent.ShortcutOverride, QtCore.QEvent.KeyPress) and event.key() == QtCore.Qt.Key_Escape:
             event.accept()
             if kind == QtCore.QEvent.KeyPress:
-                self.close()
+                if self.angle_editor is not None and self.angle_editor.isVisible():self.finish_angle_edit(commit=False)
+                else:self.close()
             return True
+        if kind==QtCore.QEvent.MouseButtonRelease and event.button()==QtCore.Qt.LeftButton and self.angle_press_pending:
+            self.angle_press_pending=False
+            if event.button()==self.button:self.ignore_trigger_release=False
+            event.accept();return True
+        if kind==QtCore.QEvent.MouseButtonRelease and event.button()==self.button and self.ignore_trigger_release:
+            self.ignore_trigger_release=False;event.accept();return True
         if kind == QtCore.QEvent.MouseButtonRelease and event.button() == self.cancel_button:
             self.close()
             event.accept()
@@ -306,6 +344,11 @@ class PiePopup(QtWidgets.QWidget):
 
     def record_press(self, point, button):
         region = self.canvas.hit(point)
+        if button==QtCore.Qt.LeftButton and region and region.get('action')=='rotate_angle':
+            if self.angle_editor is None or not self.angle_editor.isVisible():
+                self.start_angle_edit(region);self.angle_press_pending=True;return True
+            return False
+        if self.angle_editor is not None and self.angle_editor.isVisible():self.finish_angle_edit()
         if region is None or region['node']['kind'] == 'separator':
             self.cancel_button = button
             return True
@@ -330,7 +373,8 @@ class PiePopup(QtWidgets.QWidget):
         region = self.region_at(point, gesture=self.holding)
         self.canvas.hover = region
         node = region['node'] if region else None
-        self.canvas.setToolTip(node.get('label', '') if node else '')
+        title=pie.BY_ID[region['action']][1] if region and region.get('action') else node.get('label','') if node else ''
+        self.canvas.setToolTip(tooltip_label(title))
         identifier = node['id'] if node else None
         if identifier != self.hover_id:
             self.hover_id = identifier
@@ -363,6 +407,8 @@ class PiePopup(QtWidgets.QWidget):
             if 'anchor' in region:region['anchor'] += offset
         for panel in self.canvas.panels:panel['rect'].translate(offset)
         if self.cursor_point is not None:self.cursor_point += offset
+        if self.angle_editor is not None and self.angle_editor.isVisible():
+            self.angle_editor.move(self.angle_editor.pos()+offset.toPoint())
         self.frame_bounds = bounds
         self.canvas.setFixedSize(bounds.size())
         self.setFixedSize(bounds.size())
@@ -376,7 +422,7 @@ class PiePopup(QtWidgets.QWidget):
         region = self.region_at(point, gesture=True)
         node = region['node'] if region else None
         if node and node['kind'] == 'action' and self.selectable(node):
-            self.run(node['action'])
+            self.run(region.get('action',node['action']))
         else:
             self.close()
 
@@ -420,7 +466,7 @@ class PiePopup(QtWidgets.QWidget):
         if node['kind'] == 'submenu':
             self.open_submenu(region)
         else:
-            self.run(node['action'])
+            self.run(region.get('action',node['action']))
 
     def open_submenu(self, region):
         node = region['node']
@@ -440,6 +486,10 @@ class PiePopup(QtWidgets.QWidget):
         self.start_transition(snapshot)
 
     def run(self, action):
+        if action=='rotate_angle':
+            region=next((r for r in self.canvas.regions if r['node'] and r['node'].get('action')=='rotate_shells'),None)
+            if region:self.start_angle_edit(region)
+            return
         if self.executed:
             return
         self.executed = True
@@ -448,12 +498,40 @@ class PiePopup(QtWidgets.QWidget):
         from uv_straight_actions import execute
         after_menu_interaction(lambda: execute(action))
 
+    def start_angle_edit(self,region):
+        from uv_straight_move_overlaps import rotation_angle
+        self.ignore_trigger_release=self.holding
+        self.holding=False;self.cancel_button=None
+        self.submenu_timer.stop();self.back_timer.stop()
+        if self.angle_editor is None:self.angle_editor=RotationAngleEditor(self)
+        rect=next(rect for action,rect in pie.compound_parts('rotate_shells',region['rect']) if action=='rotate_angle')
+        self.angle_editor.setGeometry(rect.toAlignedRect());self.angle_editor.setValue(rotation_angle())
+        self.angle_editor.show();self.angle_editor.raise_();self.angle_editor.setFocus(QtCore.Qt.MouseFocusReason)
+        self.angle_editor.selectAll()
+
+    def finish_angle_edit(self,commit=True):
+        if self.finishing_angle or self.angle_editor is None or self.angle_editor.isHidden():return
+        self.finishing_angle=True
+        try:
+            if commit:
+                from uv_straight_move_overlaps import set_rotation_angle
+                self.angle_editor.interpretText();value=self.angle_editor.value();set_rotation_angle(value)
+                from uv_straight_actions import tool_window
+                window=tool_window()
+                if window is not None and hasattr(window,'shell_rotation_angle'):window.shell_rotation_angle.setValue(value)
+            self.angle_editor.hide()
+            if self.isVisible():self.canvas.setFocus()
+            self.canvas.update()
+        finally:self.finishing_angle=False
+
     def hideEvent(self, event):
+        self.finish_angle_edit()
         self.stop_transition()
         self.submenu_timer.stop()
         self.back_timer.stop()
         self.cursor_point = None
         self.cancel_button = None
+        self.ignore_trigger_release=False;self.angle_press_pending=False
         QtWidgets.QApplication.instance().removeEventFilter(self)
         super().hideEvent(event)
 

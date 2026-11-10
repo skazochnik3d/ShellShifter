@@ -6,6 +6,79 @@ import maya.api.OpenMaya as om
 import maya.cmds as cmds
 
 
+# Selection provenance is temporary UI state, never a scene attribute. Retain it
+# across tool reloads, but replace the native callback to avoid duplicate hooks.
+if globals().get('_packing_callback') is not None:
+    om.MMessage.removeCallback(_packing_callback)
+_packing_callback = None
+_packing_context = globals().get('_packing_context')
+
+
+def _uv_selection():
+    result = {}
+    selection = om.MGlobal.getActiveSelectionList()
+    for index in range(selection.length()):
+        path, component = selection.getComponent(index)
+        if component.isNull() or not component.hasFn(om.MFn.kMeshMapComponent):
+            return None
+        fn = om.MFnMesh(path)
+        key = (fn.uuid().asString(), path.instanceNumber())
+        indices = om.MFnSingleIndexedComponent(component)
+        ids = (range(indices.getCompleteData()) if indices.isComplete else indices.getElements())
+        entry = result.setdefault(key, (fn.currentUVSetName(), set()))
+        entry[1].update(ids)
+    return result
+
+
+def _check_packing_selection(*unused):
+    global _packing_context
+    if _packing_context is None:
+        return
+    try:
+        current = _uv_selection()
+        allowed = _packing_context[1]
+        if not current or any(key not in allowed or uv_set != allowed[key][0] or
+                              not ids <= allowed[key][1]
+                              for key, (uv_set, ids) in current.items()):
+            _packing_context = None
+    except (RuntimeError, TypeError):
+        _packing_context = None
+
+
+def packing_materials(meshes):
+    """Materials filter while UV selection stays within the browser's scope."""
+    _check_packing_selection()
+    if _packing_context is None:
+        return None
+    wanted, allowed = _packing_context
+    for item in meshes:
+        key = (item.fn.uuid().asString(), item.path.instanceNumber())
+        if (key not in allowed or item.uv_set != allowed[key][0] or
+                not item.selected <= allowed[key][1]):
+            return None
+    return wanted
+
+
+def packing_mask(path, wanted, cache=None):
+    """Live material faces and UVs, including original checker assignments."""
+    data = mapped_assignments(path, {} if cache is None else cache)
+    if data is None:
+        return frozenset(), frozenset()
+    _, _, counts, uv_ids, assignments = data
+    faces = frozenset(face for material, members in assignments.items()
+                      if material[1] in wanted for face in members)
+    offsets = [0] + list(accumulate(counts))
+    ids = frozenset(int(uv_ids[index]) for face in faces
+                    for index in range(offsets[face], offsets[face+1]) if uv_ids[index] >= 0)
+    return faces, ids
+
+
+def _watch_packing_selection():
+    global _packing_callback
+    if _packing_callback is None:
+        _packing_callback = om.MEventMessage.addEventCallback('SelectionChanged', _check_packing_selection)
+
+
 @dataclass(frozen=True)
 class Binding:
     path: str
@@ -179,6 +252,7 @@ def selection(records):
 
 
 def select(records):
+    global _packing_context
     records = tuple(records)
     components, transforms, count = selection(records)
     if records and not components:
@@ -193,4 +267,10 @@ def select(records):
             cmds.select(components, replace=True)
         else:
             cmds.select(clear=True)
+    _packing_context = (frozenset(record.uuid for record in records), _uv_selection()) if components else None
+    _watch_packing_selection()
     return count, len(transforms)
+
+
+if _packing_context is not None:
+    _watch_packing_selection()

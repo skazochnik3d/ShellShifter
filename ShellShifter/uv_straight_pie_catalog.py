@@ -1,7 +1,9 @@
 """Rounded function palette with nonblocking pointer-driven copy dragging."""
+from uv_straight_language import apply as localize
 from PySide6 import QtCore,QtGui,QtWidgets
 from shiboken6 import isValid
 import uv_straight_pie as pie
+from uv_straight_actions import tooltip_label
 
 
 class FunctionButton(QtWidgets.QToolButton):
@@ -13,7 +15,7 @@ class FunctionButton(QtWidgets.QToolButton):
         self.setObjectName('pieCatalogFunction')
         self.setText(title)
         self.setAccessibleName(title)
-        self.setToolTip(group+' · '+title+ ('\nDrag into the pie menu. Click to add.'
+        self.setToolTip(tooltip_label(group)+' · '+tooltip_label(title)+ ('\nDrag into the marking menu. Click to add.'
             if palette.draggable else '\nClick to add a shortcut.'))
         self.setSizePolicy(QtWidgets.QSizePolicy.Expanding,QtWidgets.QSizePolicy.Fixed)
         self.setFixedHeight(28)
@@ -172,6 +174,7 @@ class FunctionPicker(QtWidgets.QDialog):
         if x+self.width()>available.right():x=anchor.left()-self.width()-8
         x=max(available.left()+4,min(x,available.right()-self.width()-4))
         y=max(available.top()+4,min(anchor.top(),available.bottom()-self.height()-4))
+        localize(self)
         self.move(x,y);self.show();self.raise_();self.search.setFocus()
 
     def choose(self, action):

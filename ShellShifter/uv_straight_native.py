@@ -95,8 +95,10 @@ def set_wireframe(enabled):
 
 def display_state():
     """Shared settings, independent of which palette is currently visible."""
+    from uv_straight_colors import finished_visible
     return dict(
         wireframe_enabled=wireframe_visible(),
+        finished_unwrap_visible=finished_visible(),
         pins_enabled=bool(_manager is not None and _manager.pins_enabled),
         distortion_enabled=(bool(_manager.distortion_enabled) if _manager is not None
                             else bool(cmds.optionVar(query='uvStraightDistortion'))
@@ -430,6 +432,26 @@ def set_viewport_overlay(payload, owner):
 def clear_viewport_overlay(owner=None):
     if _manager is not None:
         _manager.clear_viewport_override(owner)
+
+
+def set_group_colors(face_payload,uv_payload):
+    if _manager is None:enable(open_uv_editor=False,pins_enabled=False)
+    faces_changed=(_manager.viewport_override_owner!='uv_groups' or
+                   _manager.viewport_override_payload!=face_payload)
+    uvs_changed=getattr(_manager,'group_uv_payload',None)!=uv_payload
+    if not (faces_changed or uvs_changed):return
+    if uvs_changed:_manager.group_uv_payload=list(uv_payload)
+    if faces_changed:_manager.set_viewport_override(face_payload,'uv_groups')
+    # UV-only edits do not require resetting the CPV override or rescanning guides.
+    _manager.refresh()
+
+
+def clear_group_colors():
+    if _manager is not None:
+        _manager.group_uv_payload=None
+        _manager.clear_viewport_override('uv_groups')
+        _manager.changes.invalidate()
+        _manager.refresh()
 
 
 def set_check_overlay(uv_payload, world_segments, owner):

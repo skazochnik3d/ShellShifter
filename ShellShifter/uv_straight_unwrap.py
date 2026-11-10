@@ -13,12 +13,21 @@ import maya.cmds as cmds
 
 
 class Surface:
-    def __init__(self, mesh):
+    def __init__(self, mesh, shell_ids=None):
         self.mesh = mesh
         world = np.array([(p.x, p.y, p.z) for p in mesh.fn.getPoints(om.MSpace.kWorld)])
         triangles, vertices = [], []
         iterator = om.MItMeshPolygon(mesh.path)
         while not iterator.isDone():
+            if shell_ids is not None:
+                try:
+                    first = iterator.getUVIndex(0, mesh.uv_set)
+                except RuntimeError:
+                    iterator.next()
+                    continue
+                if mesh.shell_ids[first] not in shell_ids:
+                    iterator.next()
+                    continue
             face_vertices = list(iterator.getVertices())
             uv_ids = [iterator.getUVIndex(i, mesh.uv_set) for i in range(len(face_vertices))]
             mapping = dict(zip(face_vertices, uv_ids))

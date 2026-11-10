@@ -20,13 +20,13 @@ class UVSetController(QtCore.QObject):
         self.callbacks = []
         self.report = ()
         self.tags = KeepSetTags(window)
-        self.tags.setToolTip('The first tag is the cleanup destination. Additional tags protect existing UV sets without changing their UVs. The distortion limit is fixed at 5%.')
+        self.tags.setToolTip('The first tag is the target UV set for cleanup. Additional tags protect existing UV sets without changing their UVs. Distortion threshold is fixed at 5%.')
         self.tags.changed.connect(self.settings_changed)
         self.button_text = button_text
         self.button = ActionButton(button_text, 'cleanup')
         self.button.setAccessibleName('UV Set Cleanup')
         self.button.setObjectName('cleanupExtraUVSets')
-        self.button.setToolTip('Check selected meshes or groups, merge qualifying shells into the first Keep sets tag, and delete unprotected UV sets. The whole operation supports Undo.')
+        self.button.setToolTip('Check selected meshes or groups, merge suitable shells into the UV set from the first Keep sets tag, and delete unprotected UV sets. The entire operation supports Undo.')
         self.button.clicked.connect(self.start_or_cancel)
         layout.addWidget(self.button)
         layout.addWidget(self.tags)

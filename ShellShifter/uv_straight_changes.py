@@ -45,7 +45,8 @@ class ChangeTracker:
         self.scope_dirty = True
 
     def watch(self, meshes):
-        wanted = {mesh.name: mesh for mesh in meshes}
+        # Callers with known DAG paths avoid resolving every mesh name per batch.
+        wanted = meshes if isinstance(meshes, dict) else {mesh.name: mesh for mesh in meshes}
         for name in list(self.nodes):
             handle, callbacks = self.nodes[name]
             if name not in wanted or not handle.isValid() or not handle.isAlive():

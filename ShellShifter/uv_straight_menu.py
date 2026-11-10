@@ -1,10 +1,39 @@
 """Adaptive marking menus: Alt+Shift+RMB, scoped by Maya's UV/model bindings."""
 from functools import partial
+import json
 import maya.cmds as cmds
 from PySide6 import QtCore, QtGui, QtWidgets
 from shiboken6 import wrapInstance, isValid
 
 _manager = globals().get('_manager')
+
+
+def restore_tools_callback(menu, original):
+    """Restore MEL script callbacks through MEL, Python callables through cmds.
+
+    menu has no sourceType flag. Passing a saved MEL script back through cmds
+    makes Maya parse it as Python and report SyntaxError during uninstall.
+    """
+    if callable(original) or not original:
+        cmds.menu(menu, edit=True, postMenuCommand=original or '')
+    else:
+        import maya.mel as mel
+        mel.eval('menu -edit -postMenuCommand {} {};'.format(
+            json.dumps(original,ensure_ascii=False),json.dumps(menu,ensure_ascii=False)))
+
+
+def tools_menus():
+    from uv_straight_native import _find_editors
+    names = {editor + 'ToolsMenu' for editor in _find_editors()}
+    if not names:
+        return set()
+    # A retired and a recreated UV Editor can temporarily share short names.
+    return {path for path in cmds.lsUI(menus=True, long=True) or []
+            if path.rsplit('|', 1)[-1] in names and cmds.menu(path, exists=True)}
+
+
+def tools_item(menu):
+    return menu + '|' + menu.rsplit('|', 1)[-1] + '_uvStraightOpen'
 
 
 def text_input_widget(widget):
@@ -66,7 +95,7 @@ def picker_window(open_window=False):
     import uv_straight as uv
     valid = picker_windows()
     active = next((window for window in valid
-                   if window.pin_picker.button.isChecked()), None)
+                   if window.pin_picker.active), None)
     visible = next((window for window in valid if window.isVisible()), None)
     window = active or visible or (valid[0] if valid else None)
     if window is None and open_window:
@@ -76,7 +105,7 @@ def picker_window(open_window=False):
 
 
 def picker_button(open_window=False):
-    """Return the live picker button, optionally opening the tool first."""
+    """Legacy helper: current palettes have no separate picker button."""
     window = picker_window(open_window)
     return window.pin_picker.button if window is not None else None
 
@@ -97,15 +126,27 @@ def picker_axis():
     return session().axis
 
 
+def picker_axes():
+    from uv_straight_pick import session
+    return session().axes
+
+
+def toggle_picker_auto_axes():
+    from uv_straight_pick import session
+    state=session()
+    state.set_auto_axes(not state.auto_axes)
+
+
 def set_picker_mode(axis=None):
-    """Select a shared mode; choosing the active menu item turns picking off."""
+    """Toggle H/V controls; no separate activation state is required."""
     if axis not in (None, 'H', 'V'):
         raise ValueError("Picker axis must be H, V or automatic.")
     from uv_straight_pick import session
     state = session()
-    turn_off = state.active and state.axis == axis
-    state.set_axis(axis)
-    state.set_active(not turn_off)
+    if axis is None:
+        state.set_active(not state.active)
+    else:
+        state.toggle_axis(axis,axis not in state.axes)
 
 
 def execute(action, *unused):
@@ -116,6 +157,7 @@ def execute(action, *unused):
         'H': partial(uv.mark, 'H'), 'V': partial(uv.mark, 'V'),
         'orient': uv.orient_selected_shells, 'unpin': uv.unpin,
         'unfold': uv.unfold, 'relax': uv.relax, 'pick': toggle_picker,
+        'relax_h':partial(uv.relax_axis,'H'), 'relax_v':partial(uv.relax_axis,'V'),
         'pick_auto': partial(set_picker_mode, None),
         'pick_H': partial(set_picker_mode, 'H'),
         'pick_V': partial(set_picker_mode, 'V'),
@@ -133,8 +175,7 @@ def execute(action, *unused):
         'window': uv.show,
     }
     if action == 'window':
-        # show() uninstalls and recreates this menu. Always unwind its native
-        # selection callback first, even if Qt already reports it hidden.
+        # Unwind the native selection callback before opening the palette.
         after_menu_interaction(partial(uv._run, commands[action]))
     else:
         uv._run(commands[action])
@@ -179,6 +220,10 @@ class MenuManager(QtCore.QObject):
 
     def eventFilter(self, watched, event):
         if self.stopping or self.stopped:
+            return False
+        if event.type() in (QtCore.QEvent.ToolTip, QtCore.QEvent.ToolTipChange):
+            from uv_straight_language import refresh_hover
+            refresh_hover(watched)
             return False
         from uv_straight_keymaps import keyboard_key, modifiers, enabled, mouse_button
         if (event.type() == QtCore.QEvent.MouseButtonPress and enabled('menu') and
@@ -323,30 +368,46 @@ class MenuManager(QtCore.QObject):
                         self.conflicts.add(control)
 
     def refresh_tools_menus(self):
-        # Maya rebuilds Tools on opening; append after its original callback.
-        from uv_straight_native import _find_editors
-        for editor in _find_editors():
-            menu = editor + 'ToolsMenu'
-            if not cmds.menu(menu, exists=True) or menu in self.tools_hooks:
+        # Maya can rebuild the menu under the same name. Check the live
+        # callback rather than assuming that a name still owns our hook.
+        active = tools_menus()
+        for menu in active | self.tools_hooks.keys():
+            if not cmds.menu(menu, exists=True):
+                self.tools_hooks.pop(menu, None)
+                continue
+            if menu not in active:
                 continue
             original = cmds.menu(menu, query=True, postMenuCommand=True)
-            def populate_tools(*unused, menu=menu, original=original):
-                if callable(original):
-                    original(*unused)
-                elif original:
-                    import maya.mel as mel
-                    mel.eval(original)
-                item = menu + '_uvStraightOpen'
-                if not cmds.menuItem(item, exists=True):
-                    cmds.menuItem(item, parent=menu, label='ShellShifter',
-                                  insertAfter='', command=partial(execute, 'window'))
-            cmds.menu(menu, edit=True, postMenuCommand=populate_tools)
-            self.tools_hooks[menu] = original
+            registered = self.tools_hooks.get(menu)
+            if not isinstance(registered, tuple) or original is not registered[1]:
+                def populate_tools(*unused, menu=menu, original=original):
+                    try:
+                        if callable(original):
+                            original(*unused)
+                        elif original:
+                            import maya.mel as mel
+                            mel.eval(original)
+                    finally:
+                        self.add_tools_item(menu)
+                cmds.menu(menu, edit=True, postMenuCommand=populate_tools)
+                self.tools_hooks[menu] = (original, populate_tools)
+            self.add_tools_item(menu)
+
+    @staticmethod
+    def add_tools_item(menu):
+        item = tools_item(menu)
+        if cmds.menu(menu, exists=True) and not cmds.menuItem(item, exists=True):
+            cmds.menuItem(item.rsplit('|', 1)[-1], parent=menu, label='ShellShifter',
+                          insertAfter='', command=partial(execute, 'window'))
 
     def stop(self):
         if self.stopping or self.stopped:
             return
         self.stopping = True
+        # A module reload can leave an older QObject alive. Its timer still
+        # points at the old cleanup implementation; replace that owned binding.
+        self.cleanup_timer.timeout.disconnect()
+        self.cleanup_timer.timeout.connect(partial(MenuManager._finish_stop,self))
         self.popup_request += 1
         if self.radial_popup is not None and isValid(self.radial_popup):
             self.radial_popup.close()
@@ -360,7 +421,7 @@ class MenuManager(QtCore.QObject):
             QtWidgets.QApplication.instance().aboutToQuit.disconnect(self.stop)
         except (RuntimeError, TypeError):
             pass
-        self._finish_stop()
+        MenuManager._finish_stop(self)
 
     def _finish_stop(self):
         if self.stopped:
@@ -376,10 +437,17 @@ class MenuManager(QtCore.QObject):
                 if cmds.popupMenu(menu, exists=True):
                     cmds.deleteUI(menu)
         self.menus.clear()
-        for menu, original in self.tools_hooks.items():
+        for menu, registered in self.tools_hooks.items():
             if cmds.menu(menu, exists=True):
-                cmds.menu(menu, edit=True, postMenuCommand=original or '')
-            item = menu + '_uvStraightOpen'
+                # During a live reload the old manager may still have the
+                # pre-hook-pair representation.
+                if not isinstance(registered, tuple):
+                    restore_tools_callback(menu, registered)
+                else:
+                    original, hook = registered
+                    if cmds.menu(menu, query=True, postMenuCommand=True) is hook:
+                        restore_tools_callback(menu, original)
+            item = tools_item(menu) if isinstance(registered, tuple) else menu + '_uvStraightOpen'
             if cmds.menuItem(item, exists=True):
                 cmds.deleteUI(item)
         self.tools_hooks.clear()
@@ -394,7 +462,7 @@ def install():
         return
     if _manager is not None and _manager.stopping:
         # Hold the retiring manager alive until its menus can be removed.
-        _manager._finish_stop()
+        MenuManager._finish_stop(_manager)
         if not _manager.stopped:
             after_menu_interaction(install)
             return
@@ -408,7 +476,8 @@ def install():
 def uninstall():
     global _manager
     if _manager is not None:
-        _manager.stop()
+        # Use the current cleanup even when the live object predates this module.
+        MenuManager.stop(_manager)
         if _manager.stopped:
             _manager = None
 

@@ -12,7 +12,7 @@ stack nor moved.
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import defaultdict,OrderedDict
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Sequence, Tuple
 import json
@@ -31,8 +31,8 @@ TILE_EPSILON = 1.0e-6
 ORIGINAL_COLOR_OPTION = "uvStraightMoveOverlapOriginalColor"
 ORIGINAL_COLOR_OWNER = "move_overlaps_originals"
 ORIGINAL_RGBA = (1.0, 0.72, 0.04, 1.0)
-NON_ORIGINAL_RGBA = (0.30, 0.30, 0.30, 1.0)
 ORIGINAL_ATTR = "uvStraightMoveOverlapOriginals"
+ORIGINAL_COLOR_HIDDEN_ATTR = "uvStraightMoveOverlapColorHidden"
 
 
 @dataclass(frozen=True)
@@ -78,9 +78,9 @@ if "_legacy_originals_migrated" not in globals():
     _legacy_originals_migrated = False
 
 
-def _selected_mesh_shapes() -> List[str]:
+def _selected_mesh_shapes(selection=None) -> List[str]:
     """Return selected polygon shapes, preserving selection order."""
-    selected = cmds.ls(selection=True, long=True, objectsOnly=True) or []
+    selected = (cmds.ls(selection=True, long=True, objectsOnly=True) or []) if selection is None else selection
     shapes: List[str] = []
     seen_shapes = set()
 
@@ -149,6 +149,9 @@ def _write_original_face_sets(shape: str, face_sets) -> None:
     if not data:
         if cmds.objExists(plug):
             cmds.deleteAttr(plug)
+        color_hidden = shape + "." + ORIGINAL_COLOR_HIDDEN_ATTR
+        if cmds.objExists(color_hidden):
+            cmds.deleteAttr(color_hidden)
         return
     if not cmds.attributeQuery(ORIGINAL_ATTR, node=shape, exists=True):
         cmds.addAttr(shape, longName=ORIGINAL_ATTR, dataType="string", hidden=True)
@@ -216,11 +219,14 @@ def original_color_visible() -> bool:
             if cmds.optionVar(exists=ORIGINAL_COLOR_OPTION) else True)
 
 
-def original_shells() -> List[Shell]:
+def original_shells(*, visible_only=False) -> List[Shell]:
     """Resolve scene-persistent originals for their current shape paths."""
     _migrate_legacy_originals()
     result = []
     for shape in _original_shapes():
+        color_hidden = shape + "." + ORIGINAL_COLOR_HIDDEN_ATTR
+        if visible_only and cmds.objExists(color_hidden) and cmds.getAttr(color_hidden):
+            continue
         face_sets = _original_face_sets(shape)
         shells, _ = _extract_shells(shape, (0, 0), False)
         result.extend(shell for shell in shells if shell.face_ids in face_sets)
@@ -228,31 +234,43 @@ def original_shells() -> List[Shell]:
 
 
 def original_color_payload() -> list:
-    """Yellow originals plus neutral faces on their meshes for clear contrast."""
-    shells = original_shells()
+    """Only faces belonging to visible originals have an overlay color."""
     original_faces = defaultdict(set)
-    for shell in shells:
+    for shell in original_shells(visible_only=True):
         original_faces[shell.shape].update(shell.face_ids)
-    payload = []
-    for shape, yellow_faces in original_faces.items():
-        polygon_count = _mesh_fn(shape).numPolygons
-        payload.extend((shape, face_id,
-                        ORIGINAL_RGBA if face_id in yellow_faces else NON_ORIGINAL_RGBA)
-                       for face_id in range(polygon_count))
-    return payload
+    return [(shape, face_id, ORIGINAL_RGBA)
+            for shape, faces in original_faces.items() for face_id in sorted(faces)]
 
 
-def refresh_original_colors() -> list:
+def refresh_original_colors(*, only_if_active=False) -> list:
     """Update the transient viewport color layer and return its payload."""
-    payload = original_color_payload() if original_color_visible() else []
     if cmds.about(batch=True):
-        return payload
+        return original_color_payload() if not only_if_active and original_color_visible() else []
     import uv_straight_native as native
+    if only_if_active and getattr(native._manager, 'viewport_override_owner', None) != ORIGINAL_COLOR_OWNER:
+        return []
+    payload = original_color_payload() if original_color_visible() else []
     if payload:
         native.set_viewport_overlay(payload, ORIGINAL_COLOR_OWNER)
     else:
         native.clear_viewport_overlay(ORIGINAL_COLOR_OWNER)
     return payload
+
+
+def hide_original_colors(shapes) -> bool:
+    """Persist a display-only clear without changing the preferred UV originals."""
+    changed = False
+    for shape in shapes:
+        if not cmds.attributeQuery(ORIGINAL_ATTR, node=shape, exists=True):
+            continue
+        plug = shape + "." + ORIGINAL_COLOR_HIDDEN_ATTR
+        if not cmds.objExists(plug):
+            cmds.addAttr(shape, longName=ORIGINAL_COLOR_HIDDEN_ATTR, attributeType="bool", hidden=True)
+        elif cmds.getAttr(plug):
+            continue
+        cmds.setAttr(plug, True)
+        changed = True
+    return changed
 
 
 def set_original_color_visible(enabled: bool) -> bool:
@@ -274,6 +292,9 @@ def set_originals_from_selection() -> int:
     with uv._undo('ShellShifter Add Overlap Originals'):
         for shape, face_sets in by_shape.items():
             _write_original_face_sets(shape, _original_face_sets(shape) | face_sets)
+            plug = shape + "." + ORIGINAL_COLOR_HIDDEN_ATTR
+            if cmds.objExists(plug):
+                cmds.deleteAttr(plug)
     added = _stored_original_keys() - before
     _last_analysis = None
     refresh_original_colors()
@@ -309,8 +330,9 @@ def clear_originals() -> int:
         import uv_straight as uv
         with uv._undo('ShellShifter Clear Overlap Originals'):
             for shape in shapes:
-                if cmds.attributeQuery(ORIGINAL_ATTR, node=shape, exists=True):
-                    cmds.deleteAttr(shape + "." + ORIGINAL_ATTR)
+                for attr in (ORIGINAL_ATTR, ORIGINAL_COLOR_HIDDEN_ATTR):
+                    if cmds.attributeQuery(attr, node=shape, exists=True):
+                        cmds.deleteAttr(shape + "." + attr)
     _preferred_originals = set()
     _legacy_originals_migrated = True
     _last_analysis = None
@@ -508,9 +530,6 @@ def _selected_uv_ids_by_shape() -> Dict[str, set]:
         return result
 
     converted = cmds.polyListComponentConversion(current, toUV=True) or []
-    if not converted:
-        return result
-
     selection = om.MSelectionList()
     for component_name in converted:
         try:
@@ -529,6 +548,15 @@ def _selected_uv_ids_by_shape() -> Dict[str, set]:
             dag_path.extendToShape()
         component_fn = om.MFnSingleIndexedComponent(component)
         result[dag_path.fullPathName()].update(int(value) for value in component_fn.getElements())
+    # Component conversion does not consistently expand transform groups.
+    # Explicit object/group selections include every descendant mesh's UVs.
+    objects=[node for node in current if '.' not in node]
+    if objects:
+        try:shapes=_selected_mesh_shapes(objects)
+        except RuntimeError:shapes=[]
+        for shape in shapes:
+            fn=_mesh_fn(shape)
+            result[shape].update(range(fn.numUVs(fn.currentUVSetName())))
     return result
 
 
@@ -639,6 +667,7 @@ def _extract_shells(
     shape: str,
     source_tile: Tuple[int, int],
     source_tile_only: bool,
+    selected_uv_ids=None,
 ) -> Tuple[List[Shell], int]:
     fn_mesh = _mesh_fn(shape)
     uv_set = fn_mesh.currentUVSetName()
@@ -673,7 +702,9 @@ def _extract_shells(
     result: List[Shell] = []
     ignored = 0
 
-    for shell_id in range(int(shell_count)):
+    wanted=(range(int(shell_count)) if selected_uv_ids is None else
+            sorted({int(shell_ids[i]) for i in selected_uv_ids if 0<=i<len(shell_ids)}))
+    for shell_id in wanted:
         uv_ids = tuple(sorted(shell_uvs.get(shell_id, ())))
         faces = shell_faces.get(shell_id, ())
         if not uv_ids or not faces:
@@ -755,13 +786,14 @@ def _object_components(groups: Sequence[Sequence[Shell]]) -> List[List[str]]:
 
 def build_plan(
     source_tile: Tuple[int, int] = (0, 0),
-    source_tile_only: bool = True,
+    source_tile_only: bool = False,
 ) -> Plan:
     shells: List[Shell] = []
     ignored = 0
+    selected_uvs=_selected_uv_ids_by_shape()
     for shape in _selected_mesh_shapes():
         extracted, skipped = _extract_shells(
-            shape, source_tile, source_tile_only
+            shape, source_tile, source_tile_only,selected_uvs.get(shape,set())
         )
         shells.extend(extracted)
         ignored += skipped
@@ -853,20 +885,14 @@ def build_plan(
             if not local:
                 unresolved.append(group)
                 continue
-            if any(shell.is_blue for shell in group):
-                # In a mixed family keep the anchor's blue shells. Its red
-                # overlaps move together with the other copies.
-                keepers.extend(shell for shell in local if shell.is_blue)
-                movers.extend(
-                    shell
-                    for shell in group
-                    if shell.owner != anchor or not shell.is_blue
-                )
-            else:
-                # With no blue candidate, one complete red mesh becomes the
-                # original and only the other red copies move.
-                keepers.extend(local)
-                movers.extend(shell for shell in group if shell.owner != anchor)
+            # An anchor can contain several coincident shells, or only flipped
+            # shells in this particular stack even when other stacks are blue.
+            # Choose exactly one local original, preferring any unflipped copy
+            # before mesh coherence. All-red stacks still retain one shell.
+            keeper = min(group,key=lambda shell:(not shell.is_blue,
+                         shell.owner != anchor,object_rank[shell.owner],shell.shell_id))
+            keepers.append(keeper)
+            movers.extend(shell for shell in group if shell is not keeper)
 
         # At least one group is consumed per iteration: the anchor comes from
         # related. Repartition only the unresolved groups to preserve coherent
@@ -895,7 +921,7 @@ def _summary(plan: Plan) -> str:
         "Meshes analysed: {}".format(len({shell.shape for shell in plan.shells})),
         "UV shells analysed: {}".format(len(plan.shells)),
         "Overlap stacks: {}".format(len(plan.groups)),
-        "Shells kept in source tile: {} (blue: {})".format(len(plan.keepers), blue_keepers),
+        "Original shells kept: {} (blue: {})".format(len(plan.keepers), blue_keepers),
         "Shells to move: {}".format(len(plan.movers)),
     ]
     if plan.preferred_keepers:
@@ -920,30 +946,14 @@ _last_analysis = None
 
 def analyse(
     source_tile: Tuple[int, int] = (0, 0),
-    source_tile_only: bool = True,
+    source_tile_only: bool = False,
 ) -> Plan:
+    """Find copies among the current selected shells, in any tile by default."""
     global _last_analysis
-    current_uvs = _selected_uv_ids_by_shape()
-    if (
-        _last_analysis is not None
-        and _last_analysis[1] == source_tile
-        and _last_analysis[2] == source_tile_only
-        and current_uvs == _last_analysis[3]
-    ):
-        original_selection = _last_analysis[4]
-        # Analyse always reads fresh UVs, even after manual edits or Undo.
-        previous_selection = cmds.ls(selection=True, long=True) or []
-        try:
-            cmds.select(original_selection, replace=True)
-            plan = build_plan(source_tile, source_tile_only)
-        finally:
-            if previous_selection:
-                cmds.select(previous_selection, replace=True)
-            else:
-                cmds.select(clear=True)
-    else:
-        original_selection = cmds.ls(selection=True, long=True) or []
-        plan = build_plan(source_tile, source_tile_only)
+    # Always use the live selection, including when it equals the previous
+    # results. Replaying a wider selection would include unselected originals.
+    original_selection = cmds.ls(selection=True, long=True) or []
+    plan = build_plan(source_tile, source_tile_only)
     message = _summary(plan)
     print("\n{} {}\n{}".format(TITLE, VERSION, message))
     om.MGlobal.displayInfo("Move Overlaps: {} stacks, {} shells to move.".format(
@@ -958,6 +968,44 @@ def analyse(
         original_selection,
     )
     return plan
+
+
+def select_tile(tile, shapes=None):
+    """Select whole visible shells contained in a tile on the scoped meshes."""
+    import uv_straight as uv
+    from uv_straight_pack import _visible_faces, _uv_face_group_mode
+    from uv_straight_groups import face_shells
+    from uv_straight_materials import packing_materials, packing_mask
+    shapes = _selected_mesh_shapes() if shapes is None else shapes
+    meshes = []
+    selected = _selected_uv_ids_by_shape()
+    for shape in shapes:
+        if not cmds.objExists(shape):continue
+        selection = om.MSelectionList();selection.add(shape)
+        path = selection.getDagPath(0)
+        if not path.isVisible():continue
+        mesh = uv.Mesh(path)
+        mesh.selected = selected.get(shape,set())
+        meshes.append(mesh)
+    materials = packing_materials(meshes)
+    face_group = _uv_face_group_mode()
+    u,v = tile;components = [];count = 0;cache = {}
+    for mesh in meshes:
+        visible = _visible_faces(mesh.path,face_group)
+        if materials is not None:visible &= packing_mask(mesh.name,materials,cache)[0]
+        shown = {owner for owner,faces in face_shells(mesh).items() if faces<=visible}
+        for ids in mesh.all_shells():
+            if int(mesh.shell_ids[min(ids)]) not in shown:continue
+            points = [mesh.points[i] for i in ids]
+            if all(u-TILE_EPSILON<=x<=u+1+TILE_EPSILON and
+                   v-TILE_EPSILON<=y<=v+1+TILE_EPSILON for x,y in points):
+                # A degenerate shell sitting on a boundary belongs to only one
+                # tile. Nondegenerate shells touching a boundary stay inside.
+                center = (sum(x for x,y in points)/len(points),sum(y for x,y in points)/len(points))
+                if (math.floor(center[0]),math.floor(center[1])) != (u,v):continue
+                components.extend(mesh.components(ids));count += 1
+    uv.select_uv_shell_components(components)
+    return count
 
 
 def move(
@@ -1045,6 +1093,98 @@ def flip(axis):
     return len(plans)
 
 
+_move_shell_cache=OrderedDict()
+
+ROTATION_OPTION='uvStraightShellRotationAngle'
+
+
+def rotation_angle():
+    return float(cmds.optionVar(query=ROTATION_OPTION)) if cmds.optionVar(exists=ROTATION_OPTION) else 90.
+
+
+def set_rotation_angle(value):
+    value=float(value)
+    if not math.isfinite(value) or not 0.<=value<=360.:raise ValueError('Rotation angle must be between 0 and 360 degrees.')
+    cmds.optionVar(floatValue=(ROTATION_OPTION,value))
+
+
+def rotate_selected_shells(degrees):
+    """Rotate all touched whole shells about their shared UV vertex centroid."""
+    import numpy as np
+    import uv_straight as uv
+    from uv_straight_pack_commit import commit
+    from uv_straight_native import uv_edit
+    degrees=float(degrees)
+    if not math.isfinite(degrees):raise ValueError('Rotation angle must be finite.')
+    angle=math.radians(degrees%360.);c,s=math.cos(angle),math.sin(angle)
+    c=0. if abs(c)<1.e-14 else c;s=0. if abs(s)<1.e-14 else s
+    matrix=np.array([[c,-s],[s,c]])
+    meshes={}
+    for shape,ids in _selected_uv_ids_by_shape().items():
+        fn=_mesh_fn(shape);uv_set=fn.currentUVSetName();handle=om.MObjectHandle(fn.object())
+        key=(handle.hashCode(),uv_set)
+        if key not in meshes:meshes[key]=(fn,handle,uv_set,set())
+        meshes[key][3].update(ids)
+    snapshots=[];shell_count=0;total=np.zeros(2);uv_count=0
+    for fn,handle,uv_set,selected in meshes.values():
+        labels=_move_shell_labels(fn,handle,uv_set)
+        chosen=np.fromiter((i for i in selected if 0<=i<len(labels)),dtype=np.int64)
+        if not len(chosen):continue
+        wanted=np.unique(labels[chosen]);shell_count+=len(wanted)
+        if degrees%360.==0.:continue
+        before=np.array(fn.getUVs(uv_set),dtype=float).T
+        moved=np.flatnonzero(np.isin(labels,wanted))
+        total+=before[moved].sum(axis=0);uv_count+=len(moved)
+        snapshots.append((fn,handle,uv_set,before,moved,len(wanted)))
+    if not shell_count:raise ValueError('Select one or more UV shells to rotate.')
+    if not uv_count:return shell_count
+    # One center across meshes and UV tiles. Instances share one UV array and
+    # must not contribute twice to its mass or receive a second transform.
+    pivot=total/uv_count;entries=[]
+    for fn,handle,uv_set,before,moved,count in snapshots:
+        after=before.copy();after[moved]=(before[moved]-pivot)@matrix.T+pivot
+        if not np.isfinite(after).all() or np.max(np.abs(after))>np.finfo(np.float32).max:
+            raise ValueError('Rotation exceeds the UV coordinate range.')
+        entry=dict(handle=handle,uv_set=uv_set,before=before.T.tolist(),after=after.T.tolist(),ids=moved.tolist(),shells=count)
+        # Guide axes follow the transformed shell, as with Orient Shells.
+        if fn.hasAttribute(uv.MARK_ATTR):
+            mesh=uv.Mesh(om.MDagPath.getAPathTo(fn.object()));current=uv._marks(mesh);groups=[];moved=set(moved)
+            for original in current:
+                group=dict(original)
+                if group['ids'] and set(group['ids'])<=moved:
+                    span=np.ptp(after[group['ids']],axis=0);group['axis']='H' if span[0]>=span[1] else 'V'
+                groups.append(group)
+            if groups!=current:
+                data=uv._mark_data(mesh);data[uv_set]={'topology':uv._topology(mesh),'groups':groups,'format':2}
+                entry['attributes']={uv.MARK_ATTR:json.dumps(data)}
+        entries.append(entry)
+    if entries:
+        with uv_edit(),uv._undo('ShellShifter Rotate Shells'):
+            commit(entries)
+    return shell_count
+
+
+def _move_shell_labels(fn,handle,uv_set):
+    """Reuse native shell connectivity only while the full UV assignment matches."""
+    import numpy as np
+    counts,ids=fn.getAssignedUVs(uv_set)
+    signature=(fn.numUVs(uv_set),np.asarray(counts,dtype=np.int32).tobytes(),
+               np.asarray(ids,dtype=np.int32).tobytes())
+    key=(handle.hashCode(),uv_set);entry=_move_shell_cache.get(key)
+    if (entry is None or not entry[0].isValid() or not entry[0].isAlive() or
+            entry[0].object()!=handle.object() or entry[1]!=signature):
+        _,labels=fn.getUvShellsIds(uv_set)
+        entry=(handle,signature,np.asarray(labels,dtype=np.int32))
+        _move_shell_cache[key]=entry
+    _move_shell_cache.move_to_end(key)
+    # Bounded per-session storage; handles never keep deleted scene nodes alive.
+    size=lambda item:len(item[2])+sum(len(data)//4 for data in item[1][1:])
+    total=sum(size(item) for item in _move_shell_cache.values())
+    while len(_move_shell_cache)>1 and (len(_move_shell_cache)>16 or total>1000000):
+        _,removed=_move_shell_cache.popitem(last=False);total-=size(removed)
+    return entry[2]
+
+
 def move_selected_shells(offset=(1.0, 0.0)):
     """Move every UV shell touched by the current selection."""
     import uv_straight as uv
@@ -1055,33 +1195,41 @@ def move_selected_shells(offset=(1.0, 0.0)):
     if not all(map(math.isfinite, (u_value, v_value))):
         raise ValueError('Move offset must contain finite U and V values.')
 
-    selection, meshes = uv._selection()
-    plans = []
+    import numpy as np
+    from uv_straight_pack_commit import commit
+    from uv_straight_native import uv_edit
+    selected=_selected_uv_ids_by_shape()
+    # Only UV arrays and shell IDs are needed for translation. Avoid Mesh's
+    # per-face/edge geometry walk and thousands of flattened component strings.
+    meshes={}
+    for shape,ids in selected.items():
+        fn=_mesh_fn(shape);uv_set=fn.currentUVSetName();handle=om.MObjectHandle(fn.object())
+        key=(handle.hashCode(),uv_set)
+        if key not in meshes:meshes[key]=(fn,handle,uv_set,set())
+        meshes[key][3].update(ids) # DAG instances share the same physical UVs.
+    entries=[]
     shell_count = 0
-    for mesh in meshes:
-        shells = mesh.shells()
-        if not shells:
-            continue
-        uv_ids = set().union(*shells)
-        positions = {
-            index: (mesh.points[index][0] + u_value,
-                    mesh.points[index][1] + v_value)
-            for index in uv_ids
-        }
-        plans.append((mesh, positions))
-        shell_count += len(shells)
-    if not plans:
+    for fn,handle,uv_set,ids in meshes.values():
+        labels=_move_shell_labels(fn,handle,uv_set)
+        chosen=np.fromiter((i for i in ids if 0<=i<len(labels)),dtype=np.int64)
+        if not len(chosen):continue
+        wanted=np.unique(labels[chosen]);uv_ids=np.flatnonzero(np.isin(labels,wanted))
+        shell_count+=len(wanted)
+        if (u_value,v_value)==(0.,0.):continue
+        before=np.array(fn.getUVs(uv_set),dtype=np.float64);after=before.copy()
+        after[:,uv_ids]+=np.array([[u_value],[v_value]])
+        if not np.isfinite(after[:,uv_ids]).all() or np.max(np.abs(after[:,uv_ids]))>np.finfo(np.float32).max:
+            raise ValueError('Move offset exceeds the UV coordinate range.')
+        entries.append(dict(handle=handle,uv_set=uv_set,before=before.tolist(),after=after.tolist(),
+                            ids=uv_ids.tolist(),shells=len(wanted),offset=(u_value,v_value)))
+    if not shell_count:
         raise ValueError('Select one or more UV shells to move.')
 
-    with uv._undo('ShellShifter Move Selected Shells'):
-        try:
-            for mesh, positions in plans:
-                mesh.write(positions)
-        finally:
-            if selection:
-                cmds.select(selection, replace=True)
-            else:
-                cmds.select(clear=True)
+    if entries:
+        # One native command owns all arrays, pins and history-backed updates.
+        # It leaves selection/masks untouched and rolls every mesh back on error.
+        with uv_edit(),uv._undo('ShellShifter Move Selected Shells'):
+            commit(entries)
     om.MGlobal.displayInfo(
         'ShellShifter: moved {} selected shell{} by U {}, V {}.'.format(
             shell_count, '' if shell_count == 1 else 's', u_value, v_value))

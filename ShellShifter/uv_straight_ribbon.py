@@ -3,7 +3,6 @@ from collections import defaultdict
 from copy import copy
 import heapq
 import math
-from types import SimpleNamespace
 
 import numpy as np
 import maya.api.OpenMaya as om
@@ -182,8 +181,7 @@ def unfold_ribbons(mesh, shells):
             for tri in local_triangles:
                 proxy.faces.append(tuple(face[j] for j in tri))
                 proxy.face_vertices.append(tuple(vertices[j] for j in tri))
-        proxy.fn = SimpleNamespace(getPoint=lambda i: world[i],
-                                   getEdgeVertices=mesh.fn.getEdgeVertices)
+        proxy.solver_geometry = world
         scale = math.sqrt(area/float(geometry.area.sum()))
         refined = uv._surface_relax(proxy, set(shell), groups, set(), seed, scale)
         candidates = ({i: solved.points[i] for i in shell}, refined)

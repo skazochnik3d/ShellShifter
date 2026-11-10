@@ -2,6 +2,7 @@
 import math
 import numpy as np
 import maya.api.OpenMaya as om
+from uv_straight_colors import DISTORTION_NEUTRAL
 
 
 def shell_neutral_scale(densities, weights):
@@ -96,6 +97,7 @@ class VectorGeometry:
     def __init__(self, faces, positions):
         self.face_ids = np.array([face[0] for face in faces], dtype=np.int32)
         self.face_shells = np.array([face[1] for face in faces], dtype=np.int32)
+        self.signed_deviation = np.full(len(faces), np.nan)
         self.face_offsets = {int(face): i for i, face in enumerate(self.face_ids)}
         self.triangle_counts = np.array([len(face[-1]) for face in faces], dtype=np.int32)
         self.starts = np.r_[0, np.cumsum(self.triangle_counts)]
@@ -175,13 +177,8 @@ class VectorGeometry:
         np.minimum.at(minimum, tri_faces[valid], np.min(deviations[valid], axis=1))
         np.maximum.at(maximum, tri_faces[valid], np.max(deviations[valid], axis=1))
         signed = np.where(np.round(np.abs(minimum), 10) >= np.round(np.abs(maximum), 10), minimum, maximum)
-        dead_zone = math.log(1.02)
-        strength = np.minimum(1., np.maximum(0., np.abs(signed)-dead_zone)/
-                              (math.log(2.)-dead_zone)*max(.01, float(color_range)))
-        targets = np.where(signed[:, None] > 0, np.array([.08, .32, 1.]), np.array([1., .08, .03]))
-        # Maya's CPV buffer stores float32. Keep that same precision in the
-        # cache so harmless double rounding cannot trigger native rewrites.
-        rgb = (.48*(1-strength[:, None])+targets*strength[:, None]).astype(np.float32)
+        self.signed_deviation[face_indices[mapped]] = signed[mapped]
+        rgb, strength = self.colors(signed, color_range)
         uv_result, face_colors = [], []
         for i in np.flatnonzero(mapped):
             face, _, ids, _, _ = faces[i]
@@ -189,3 +186,27 @@ class VectorGeometry:
             uv_result.append((color+(.65*float(strength[i]),), [(u[j], v[j]) for j in ids]))
             face_colors.append((shape, face, color+(1.,)))
         return uv_result, [], face_colors
+
+    def recolor(self, result, color_range):
+        polygons, _, face_colors = result
+        offsets = [self.face_offsets[face] for _, face, _ in face_colors]
+        rgb, strength = self.colors(self.signed_deviation[offsets], color_range)
+        uv_result, viewport_result = [], []
+        for (shape, face, _), (_, points), color, opacity in zip(face_colors, polygons, rgb, strength):
+            color = tuple(map(float, color))
+            uv_result.append((color + (.65 * float(opacity),), points))
+            viewport_result.append((shape, face, color + (1.,)))
+        return uv_result, [], viewport_result
+
+    @staticmethod
+    def colors(signed, color_range):
+        dead_zone = math.log(1.02)
+        # Soft saturation keeps contrast responsive after strong distortions
+        # would have reached the old hard clamp. Neutral UVs remain neutral.
+        strength = -np.expm1(-np.maximum(0., np.abs(signed)-dead_zone)/
+                            (math.log(2.)-dead_zone)*max(.01, float(color_range)))
+        targets = np.where(signed[:, None] > 0, np.array([.08, .32, 1.]), np.array([1., .08, .03]))
+        # Maya's CPV buffer stores float32. Keep that same precision in the
+        # cache so harmless double rounding cannot trigger native rewrites.
+        rgb = (DISTORTION_NEUTRAL[0]*(1-strength[:, None])+targets*strength[:, None]).astype(np.float32)
+        return rgb, strength

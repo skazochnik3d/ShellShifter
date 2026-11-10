@@ -1,6 +1,6 @@
 # ShellShifter
 
-UV tools for **Autodesk Maya 2025 and 2027 on Windows**.
+UV tools for **Autodesk Maya 2024, 2025, 2026 and 2027 on Windows**.
 
 Unwrap and Unfold with H/V guides, GPU packing, texel density, distortion
 display, UV checks, material-based UV selection, stacking and a custom pie menu.
@@ -8,15 +8,15 @@ display, UV checks, material-based UV selection, stacking and a custom pie menu.
 ## Install
 
 1. Download the archive for your Maya version from [Releases](https://github.com/skazochnik3d/ShellShifter/releases).
-2. Extract the entire archive to a permanent folder that you can write to.
-3. Drag **install_shellshifter.py** from that folder into Maya's 3D viewport.
-4. Save All Shelves. Click **SS** to open ShellShifter next time.
+2. Extract the entire archive and drag **install_shellshifter.py** into Maya's 3D viewport.
+3. Click the ShellShifter logo on the Shelf to open the plugin.
 
-Keep the extracted folder in place: the Shelf button uses its path.
-Maya's bundled Python, Qt and NumPy are sufficient. GPU packing needs an
+The installer copies the plugin into Maya's scripts folder and saves the Shelf button.
+You can remove the ZIP and extracted folder after installation. The Maya 2024 package
+includes the required NumPy wheel. GPU packing needs an
 OpenCL 1.2 driver with FP64 support; Unwrap uses Maya's Unfold3D.
 
-[Русская инструкция](docs/INSTALL_RU.txt) · [English instructions](docs/INSTALL_EN.txt)
+[Русская инструкция](ShellShifter/INSTALL_RU.txt) · [English instructions](ShellShifter/INSTALL_EN.txt)
 
 ## Updates
 
@@ -37,7 +37,7 @@ the user must approve public publication. Send runs in the background and
 returns a GitHub Issue link. The reporting service must first be connected by
 the maintainer; an empty endpoint keeps Send disabled. No scene files, paths,
 automatic screenshots or credentials are collected by the plugin.
-See [service setup](https://github.com/skazochnik3d/ShellShifter/blob/main/docs/BUG_REPORTS_SETUP_RU.md).
+See [service setup](docs/BUG_REPORTS_SETUP_RU.md).
 
 ## Tools
 
@@ -60,19 +60,10 @@ opens the pie menu; **Shift + wheel** adjusts the H/V angle with a fading displa
 
 ## Development
 
-The repository is organized into four folders:
+- [`ShellShifter`](ShellShifter/) contains the Maya 2025–2027 runtime.
+- [`ports/Maya2024/ShellShifter`](ports/Maya2024/ShellShifter/) contains the Maya 2024 PySide2 port.
+- [`docs`](docs/) and [`tools`](tools/) contain packaging documentation and tools.
+- [`services`](services/) contains the optional bug-report intake service.
 
-- [`ShellShifter`](ShellShifter/) — plugin modules, installer and checker asset.
-- [`docs`](docs/) — installation, publishing instructions and release notes.
-- [`tools`](tools/) — release builder and runtime file list.
-- [`services`](services/) — optional bug-report service; excluded from plugin archives.
-
-Only files listed in `tools/runtime_files.json` are included in install archives.
-Archives keep all modules beside `install_shellshifter.py` in one plugin folder.
-If installing from a source-code archive, open the `ShellShifter` folder first.
-See [publishing instructions](docs/PUBLISH.md) for building future updates.
-
-The current runtime was verified in Maya 2025 and 2027. Release checks cover
-the updater, rollback, GUI responsiveness, palette/pie/shortcut integration,
-native plugins and representative UV operations. No external Python packages
-are required.
+Use the Maya-specific install ZIP from Releases for installation. The GitHub
+source snapshot omits the bundled Maya 2024 wheel and the per-package manifests.

@@ -385,27 +385,38 @@ class ColorOverlay(QtWidgets.QWidget):
             painter.setClipRect(self.rect())
             painter.setPen(QtCore.Qt.NoPen)
             self._draw_distortion(painter, bounds)
+            left, right, bottom, top = bounds
+            sx = self.width() / (right - left)
+            sy = self.height() / (top - bottom)
+
+            def project(point):
+                return QtCore.QPointF((point[0] - left) * sx, (top - point[1]) * sy)
+
+            def visible_points(points, radius):
+                du, dv = radius / sx, radius / sy
+                return [project(point) for point in points
+                        if left-du <= point[0] <= right+du and bottom-dv <= point[1] <= top+dv]
+
             for color, segments, points in self.payload:
                 qcolor = QtGui.QColor.fromRgbF(*color)
                 pen = QtGui.QPen(qcolor, 3.)
                 pen.setCapStyle(QtCore.Qt.RoundCap)
                 painter.setPen(pen)
-                project = lambda point: project_uv(point, bounds, self.width(), self.height())
                 for a, b in segments:
                     painter.drawLine(project(a), project(b))
                 painter.setPen(QtCore.Qt.NoPen)
                 painter.setBrush(qcolor)
-                for point in points:
-                    painter.drawEllipse(project(point), 3.5, 3.5)
+                for point in visible_points(points, 3.5):
+                    painter.drawEllipse(point, 3.5, 3.5)
             if self.selected_points:
-                project = lambda point: project_uv(point, bounds, self.width(), self.height())
+                points = visible_points(self.selected_points, 6.)
                 painter.setPen(QtCore.Qt.NoPen)
                 painter.setBrush(QtGui.QColor(20, 28, 20, 220))
-                for point in self.selected_points:
-                    painter.drawEllipse(project(point), 6., 6.)
+                for point in points:
+                    painter.drawEllipse(point, 6., 6.)
                 painter.setBrush(QtGui.QColor(92, 255, 72))
-                for point in self.selected_points:
-                    painter.drawEllipse(project(point), 4.4, 4.4)
+                for point in points:
+                    painter.drawEllipse(point, 4.4, 4.4)
             self.draw_count += 1
             self.error = ''
         except Exception as error:

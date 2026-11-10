@@ -7,15 +7,20 @@ import weakref
 import maya.cmds as cmds
 from PySide6 import QtCore, QtGui, QtWidgets
 from shiboken6 import isValid, wrapInstance
-from uv_straight_actions import CATALOG as ACTION_CATALOG, BY_ID, button_title
+from uv_straight_actions import ASSIGNABLE_CATALOG, BY_ID, button_title, tooltip_label
 
+COMPOUND_ACTIONS={'relax':('relax','relax_h','relax_v'),
+                  'flip_shells':('flip_u','flip_v'),
+                  'rotate_shells':('rotate_angle','rotate_ccw','rotate_cw')}
 CATALOG = tuple((action, group, button_title(action))
-                for action, group, _ in ACTION_CATALOG)
+                for action, group, _ in ASSIGNABLE_CATALOG
+                if action not in ('relax_h','relax_v','flip_u','flip_v','rotate_angle','rotate_ccw','rotate_cw'))
 
 OPTION = 'shellShifterPieLayout'
 MIME = 'application/x-shellshifter-pie'
-DIRECTIONS = ('NW', 'N', 'NE', 'W', 'E', 'SW', 'S', 'SE')
-CLOCKWISE = ('N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW')
+DIRECTIONS = ('NW', 'N', 'NE', 'W', 'W2', 'W3', 'E', 'E2', 'E3', 'SW', 'S', 'SE')
+CLOCKWISE = ('N', 'NE', 'E', 'E3', 'E2', 'SE', 'S', 'SW', 'W2', 'W3', 'W', 'NW')
+NATIVE_DIRECTIONS = ('NW','N','NE','W','E','SW','S','SE')
 RADIAL_RADIUS = 70.
 _clients = globals().get('_clients', weakref.WeakSet())
 _editor = globals().get('_editor')
@@ -33,20 +38,21 @@ def entry(action=None, label=None, children=None):
 
 
 def default_layout():
-    return dict(version=1, defaults_revision=227, slots={
-        'N': entry('mark_v'), 'E': entry('mark_h'),
-        'S': entry('orient'), 'W': entry('unpin'),
+    up_pair='row_'+uuid.uuid4().hex;down_pair='row_'+uuid.uuid4().hex
+    return dict(version=1, defaults_revision=238, slots={
+        'N': entry(label='Unwrap', children=[
+            entry('unwrap_mesh', 'Unwrap Mesh'), entry('straighten_quads')]),
         'NW': entry('unfold'), 'NE': entry('relax'),
-        'SW': entry(label='Edit Pins', children=[
-            entry('pick_auto'), entry('pick_h'), entry('pick_v')]),
-        'SE': entry(label='Unwrap', children=[
-            entry('unwrap_mesh', 'Unwrap Mesh'),
-            entry('straighten_quads')])}, items=[
+        'W': entry('stack_shells'), 'E': entry('orient'),
+        'W3': entry('flip_shells'), 'E3': entry('pin_axis_h'),
+        'W2': entry('rotate_shells'), 'E2': entry('pin_axis_v'),
+        'SW': entry('unpin'), 'SE': entry('match_uvs'),
+        }, items=[
         paired_entry('checker_apply', None, 'checker'),
         paired_entry('checker_remove', 'Remove Checker', 'checker'),
-        paired_entry('tiles_down', '÷2', 'tiling'), paired_entry('tiles_up', '×2', 'tiling'),
-        entry('distortion'),
-        paired_entry('done', 'Mark Done', 'done'), paired_entry('done_clear', 'Clear Done', 'done')])
+        paired_entry('tiles_up', '×2', up_pair), paired_entry('done', 'Mark Done', up_pair),
+        paired_entry('tiles_down', '÷2', down_pair), paired_entry('done_clear', 'Clear Done', down_pair),
+        entry('distortion')])
 
 
 def paired_entry(action, label, pair):
@@ -183,8 +189,15 @@ def validate(raw, normalize_labels=True):
                 # Update shipped captions in existing layouts while retaining
                 # entry IDs, placement, action IDs and deliberate custom names.
                 aliases = {
+                    'show_pins':('Show H/V Pins', 'Show Pins'), 'distortion':('Show Distortion',),
+                    'density_clear':('Clear',),
+                    'scene_colors':('Restore Scene Colors',),
+                    'bad_overlaps':('Check Overlaps', 'Check Shells', 'Check 99%'),
+                    'auto_hv': ('Auto H/V',),
                     'unpin': ('Unpin Selected',), 'unfold': ('Unfold with Pins',),
                     'relax': ('Relax with Pins',),
+                    'stack_shells':('Stack Similar Shells',),
+                    'overlap_analyse':('Analyse',),
                     'straighten_quads': ('Quad Strip', 'Straighten Quad Shells'),
                     'pick_toggle': ('Toggle Segment',),
                     'pick_auto': ('Automatic H/V', 'Automatic H V', 'Automatic HV',
@@ -193,7 +206,7 @@ def validate(raw, normalize_labels=True):
                     'checker_gray': ('Gray Squares',),
                     'checker_color': ('Color Labels',),
                     'tiles_up': ('Multiply by 2',), 'tiles_down': ('Divide by 2',),
-                    'density_analyse': ('Analyse && Show',),
+                    'density_analyse': ('Analyse && Show','Analyse & Show'),
                 }
                 action = node['action']
                 if result['label'] in (BY_ID[action][1], *aliases.get(action, ())):
@@ -230,8 +243,15 @@ def load():
                 value['items'] = double_default_items(value['items'])
                 value['defaults_revision'] = 163
             value = validate(value)
-            if value['defaults_revision'] < 227:
-                value['defaults_revision'] = 227
+            if value['defaults_revision'] < 237:
+                # The first two-side-slot build exposed two identical Auto H/V
+                # captions. Its new side buttons were intended as mode toggles.
+                for direction in ('W2','E2'):
+                    node=value['slots'].get(direction)
+                    if (node and node.get('action')=='auto_hv' and
+                            node.get('label') in ('Auto H/V','Mark Auto H/V')):
+                        node.update(action='pick_axes_auto',label='Auto H/V')
+                value['defaults_revision'] = 237
                 cmds.optionVar(stringValue=(OPTION, json.dumps(value)))
             return value
     except (ValueError, TypeError, AttributeError, KeyError):
@@ -251,19 +271,22 @@ def layout():
 def radial_entries(value=None):
     """Stable clockwise order, with no vacant directions in the visible ring."""
     value = _layout if value is None else value
-    return [(direction, value['slots'][direction]) for direction in CLOCKWISE
-            if value['slots'][direction] is not None]
+    return [(direction, value['slots'].get(direction)) for direction in CLOCKWISE
+            if value['slots'].get(direction) is not None]
 
 
 def radial_geometry(width, metrics, value=None):
-    """Shared editor/popup geometry: equal angles for the occupied entries only."""
-    return ring_geometry(width, metrics, radial_entries(value))
+    """Distribute occupied slots evenly while keeping their clockwise order."""
+    center, regions, bottom = ring_geometry(width, metrics, radial_entries(value))
+    if regions:
+        bottom = max(center.y(), max(region['rect'].bottom() for region in regions)) + 14.
+    return center, regions, bottom
 
 
 def ring_geometry(width, metrics, nodes, angles=None):
     """Fit wrapped labels around fixed gesture anchors, identically on both surfaces."""
     width = max(200, width)
-    reference = 240.
+    reference = 256.
     cap = 104.
     radius = RADIAL_RADIUS
     center = QtCore.QPointF(reference*.5, radius+24.)
@@ -274,17 +297,24 @@ def ring_geometry(width, metrics, nodes, angles=None):
     anchors = [center+QtCore.QPointF(math.cos(angle)*radius, math.sin(angle)*radius) for angle in angles]
     for index, (direction, node) in enumerate(nodes):
         angle = angles[index]
-        padding = 48 if node['kind'] == 'submenu' else 37
+        compound=node.get('action') in COMPOUND_ACTIONS
+        padding = 74 if compound else 48 if node['kind'] == 'submenu' else 37
         requested = metrics.horizontalAdvance(node['label'])+padding
         anchor = anchors[index]
-        item_width = min(cap, max(62., requested))
+        item_cap=96. if node.get('action') in ('flip_shells','rotate_shells') else cap
+        item_width = min(item_cap, max(104. if compound else 62., requested))
         text_bounds = metrics.boundingRect(QtCore.QRect(0, 0, int(item_width-padding), 1000),
                                           QtCore.Qt.TextWordWrap, node['label'])
-        height = max(20., text_bounds.height()+6.)
+        height = max(22. if compound else 20., text_bounds.height()+6.)
         x = max(8., min(anchor.x()-item_width*.5, reference-8.-item_width))
         rect = QtCore.QRectF(x, anchor.y()-height*.5, item_width, height)
-        # Leave space for the centre dot and the opposite column.
-        if math.cos(angle) < -.1:
+        # Align the three side rows into balanced columns, leaving the center
+        # dot clear even beside a full-width Flip/Rotate/Relax block.
+        if math.cos(angle)<-.8:
+            rect.moveRight(reference*.5-16.)
+        elif math.cos(angle)>.8:
+            rect.moveLeft(reference*.5+16.)
+        elif math.cos(angle) < -.1:
             rect.moveRight(min(rect.right(), reference*.5-8.))
         elif math.cos(angle) > .1:
             rect.moveLeft(max(rect.left(), reference*.5+8.))
@@ -312,6 +342,37 @@ def ring_geometry(width, metrics, nodes, angles=None):
         region['rect'].translate(offset)
         region['anchor'] += offset
     return center, regions, max(center.y()+radius+30., max(r['rect'].bottom() for r in regions)+14.)
+
+
+def relax_parts(rect):
+    """One saved/dragged Relax entry, three independently clickable regions."""
+    axis_width=18.;gap=2.
+    return [('relax',QtCore.QRectF(rect.left(),rect.top(),rect.width()-2*(axis_width+gap),rect.height())),
+            ('relax_h',QtCore.QRectF(rect.right()-2*axis_width-gap,rect.top(),axis_width,rect.height())),
+            ('relax_v',QtCore.QRectF(rect.right()-axis_width,rect.top(),axis_width,rect.height()))]
+
+
+def compound_parts(action,rect):
+    if action=='relax':return relax_parts(rect)
+    if action=='flip_shells':
+        width=(rect.width()-2.)*.5
+        return [('flip_u',QtCore.QRectF(rect.left(),rect.top(),width,rect.height())),
+                ('flip_v',QtCore.QRectF(rect.left()+width+2,rect.top(),width,rect.height()))]
+    if action=='rotate_shells':
+        width=22.;gap=2.
+        return [('rotate_angle',QtCore.QRectF(rect.left(),rect.top(),rect.width()-2*(width+gap),rect.height())),
+                ('rotate_ccw',QtCore.QRectF(rect.right()-2*width-gap,rect.top(),width,rect.height())),
+                ('rotate_cw',QtCore.QRectF(rect.right()-width,rect.top(),width,rect.height()))]
+    return []
+
+
+def part_label(action,node):
+    if action in ('relax_h','relax_v'):return action[-1].upper()
+    if action=='rotate_angle':
+        from uv_straight_move_overlaps import rotation_angle
+        return '{:g}°'.format(rotation_angle())
+    if action in ('rotate_ccw','rotate_cw'):return ''
+    return node['label'] if action=='relax' else button_title(action)
 
 
 def publish(value, remember=True):
@@ -524,11 +585,16 @@ def icon_key(node):
 
 def checked(action):
     import uv_straight_menu as menu
+    if action in ('pin_axis_h', 'pin_axis_v'):
+        return action[-1].upper() in menu.picker_axes()
     if action.startswith('pick_'):
-        active, axis = menu.picker_active(), menu.picker_axis()
-        if action == 'pick_toggle':
+        if action=='pick_axes_auto':
+            from uv_straight_pick import session
+            return session().auto_axes
+        active, axes = menu.picker_active(), menu.picker_axes()
+        if action in ('pick_toggle','pick_auto'):
             return active
-        return active and axis == dict(pick_auto=None, pick_h='H', pick_v='V')[action]
+        return dict(pick_h='H', pick_v='V')[action] in axes
     if action in ('wireframe', 'distortion', 'show_pins'):
         import uv_straight_native as native
         return native.display_state()[dict(wireframe='wireframe_enabled',
@@ -539,11 +605,18 @@ def checked(action):
     if action == 'original_color':
         import uv_straight_move_overlaps as overlaps
         return overlaps.original_color_visible()
+    if action == 'scene_colors':
+        from uv_straight_colors import finished_visible
+        return finished_visible()
     return None
 
 
 NO_SELECTION = {'window', 'popup', 'wireframe', 'distortion', 'show_pins', 'original_color',
-                'pick_toggle', 'pick_auto', 'pick_h', 'pick_v', 'density_clear', 'scene_colors', 'original_clear'}
+                'pick_toggle', 'pick_auto', 'pick_h', 'pick_v', 'pick_axes_auto', 'density_clear',
+                'scene_colors', 'original_clear', 'rotate_angle', 'pin_axis_h', 'pin_axis_v',
+                'texel_groups', 'shell_groups', 'texture_transfer', 'transfer_connect',
+                'display_texel', 'display_checker', 'material_assign', 'material_clear',
+                'material_convert', 'material_view', 'material_refresh', 'check_updates'}
 
 
 def populate(menu):
@@ -557,7 +630,7 @@ def populate(menu):
     def selectable(node):
         return (selected or node.get('action') in NO_SELECTION or
                 any(selectable(child) for child in node.get('children', [])))
-    def add(node, parent, direction=None):
+    def add(node, parent, direction=None,compound=True):
         if node['kind'] == 'separator':
             cmds.menuItem(parent=parent, divider=True)
             return
@@ -571,6 +644,10 @@ def populate(menu):
         image = menu_image(icon_key(node), active=active)
         if image:
             args['image'] = image
+        if compound and node.get('action') in COMPOUND_ACTIONS:
+            submenu=cmds.menuItem(**dict(args,subMenu=True))
+            for action in COMPOUND_ACTIONS[node['action']]:add(entry(action),submenu,compound=False)
+            return
         if node['kind'] == 'submenu':
             args.update(subMenu=True, boldFont=active)
             submenu = cmds.menuItem(**args)
@@ -585,12 +662,13 @@ def populate(menu):
                 native_menu.after_menu_interaction(lambda: execute(action))
             args['command'] = run
             cmds.menuItem(**args)
-    for direction in DIRECTIONS:
+    for direction in NATIVE_DIRECTIONS:
         if _layout['slots'][direction]:
             add(_layout['slots'][direction], menu, direction)
-    if _layout['items']:
+    extras=[_layout['slots'].get(d) for d in ('W2','E2','W3','E3') if _layout['slots'].get(d)]
+    if _layout['items'] or extras:
         cmds.menuItem(parent=menu, divider=True)
-        for node in _layout['items']:
+        for node in extras+_layout['items']:
             add(node, menu)
 
 
@@ -717,7 +795,7 @@ class MenuTree(QtWidgets.QTreeWidget):
                 title = node.get('label', '— Separator —')
                 item = QtWidgets.QTreeWidgetItem([title])
                 item.setData(0, QtCore.Qt.UserRole, node['id'])
-                item.setToolTip(0, title)
+                item.setToolTip(0, tooltip_label(title))
                 parent.addChild(item)
                 if node['id'] == self.editor.identifier:
                     self.setCurrentItem(item)
@@ -842,13 +920,15 @@ class PieEditor(QtWidgets.QDialog):
         self.slots = {}
         for direction, row, column in (('NW', 0, 0), ('N', 0, 1), ('NE', 0, 2),
                                        ('W', 1, 0), ('E', 1, 2),
-                                       ('SW', 2, 0), ('S', 2, 1), ('SE', 2, 2)):
+                                       ('W3', 2, 0), ('E3', 2, 2),
+                                       ('W2', 3, 0), ('E2', 3, 2),
+                                       ('SW', 4, 0), ('S', 4, 1), ('SE', 4, 2)):
             button = RadialSlot(direction, self)
             self.slots[direction] = button
             grid.addWidget(button, row, column)
         center = QtWidgets.QLabel('Pie Menu\n●')
         center.setAlignment(QtCore.Qt.AlignCenter)
-        grid.addWidget(center, 1, 1)
+        grid.addWidget(center, 1, 1,3,1)
         right.addWidget(canvas, 2)
         details = QtWidgets.QHBoxLayout()
         self.title = QtWidgets.QLineEdit()
@@ -960,7 +1040,7 @@ class PieEditor(QtWidgets.QDialog):
             metrics = QtGui.QFontMetrics(button.font())
             button.setText(direction+'\n'+metrics.elidedText(title, QtCore.Qt.ElideRight, 170)+
                            ('  >' if node and node['kind'] == 'submenu' else ''))
-            button.setToolTip(title+'\nDrag to swap positions. Drop a function or menu entry here.')
+            button.setToolTip(tooltip_label(title)+'\nDrag to swap positions. Drop an action or menu item here.')
             button.setChecked(direction == self.direction)
             if node:
                 from uv_straight_icons import PATHS, icon
@@ -1005,5 +1085,7 @@ def show_editor(window):
     editor.setWindowModality(QtCore.Qt.ApplicationModal)
     window.pie_editor = editor
     _editor = editor
+    from uv_straight_language import apply
+    apply(editor)
     editor.show()
     return editor

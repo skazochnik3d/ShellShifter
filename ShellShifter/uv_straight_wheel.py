@@ -203,10 +203,11 @@ class AngleWheel(QtCore.QObject):
         try:
             import uv_straight as uv
             if self.angle.value() == 0:
-                uv.unpin(whole_shell=True)
+                from uv_straight_pick import enabled_pin_axes
+                uv.unpin(whole_shell=True, axes=enabled_pin_axes() or None)
                 self.notify('Auto H/V: 0° · Pins removed from selected shells')
             else:
-                count = uv.auto_mark(self.angle.value(), whole_shells=True)
+                count = uv.auto_mark(self.angle.value(), whole_shells=True,whole_shell_solve=True)
                 self.notify('Auto H/V: {:.0f}° · {} groups'.format(self.angle.value(), count))
             import uv_straight_native as native
             if native._manager is not None:
@@ -270,6 +271,14 @@ class PaletteWheelBinding:
 def ensure_service():
     global _service
     if _service is not None and isValid(_service) and not _service.stopped:
+        # The shared QObject survives palette/module reloads. Its timer must
+        # invoke this build's apply method, including the wheel solve scope.
+        previous=_service.apply
+        if getattr(previous,'__func__',None) is not AngleWheel.apply:
+            try:_service.timer.timeout.disconnect(previous)
+            except (RuntimeError,TypeError):pass
+            _service.apply=AngleWheel.apply.__get__(_service,type(_service))
+            _service.timer.timeout.connect(_service.apply)
         return _service
     pointer = omui.MQtUtil.mainWindow()
     parent = wrapInstance(int(pointer), QtWidgets.QWidget) if pointer else None

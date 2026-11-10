@@ -96,6 +96,25 @@ def select_small_shells(minimum_pixels=1.0, texture_size=2048):
     return shells
 
 
+def select_zero_area_shells():
+    """Select shells whose mapped triangles all have zero UV area."""
+    import uv_straight as uv
+    from uv_straight_pack import _triangle_area, _triangles_by_shell
+
+    _, meshes = uv._selection(build_edges=False)
+    collapsed = []
+    for mesh in meshes:
+        owners = {mesh.shell_ids[index] for index in mesh.selected}
+        triangles_by_shell = _triangles_by_shell(mesh, owners=owners)
+        for shell in mesh.shells():
+            triangles = triangles_by_shell.get(mesh.shell_ids[next(iter(shell))])
+            # Test triangle areas separately so opposite winding cannot cancel.
+            if triangles and all(_triangle_area(triangle) == 0.0 for triangle in triangles):
+                collapsed.append(mesh.components(shell))
+    uv.select_uv_shell_components([component for shell in collapsed for component in shell])
+    return collapsed
+
+
 def find_hard_edges_without_seams():
     """Find selected meshes' internal hard edges that still share one UV edge."""
     from uv_straight_move_overlaps import _selected_mesh_shapes

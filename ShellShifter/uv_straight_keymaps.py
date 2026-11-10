@@ -1,4 +1,5 @@
 """Persistent mouse bindings shared by UI and event handlers."""
+from uv_straight_language import apply as localize
 import maya.cmds as cmds
 import weakref
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -168,6 +169,7 @@ class BindingField(QtWidgets.QPushButton):
             owner.show()
         dialog = BindingCapture(self.action, self)
         try:
+            localize(dialog)
             if dialog.exec() == QtWidgets.QDialog.Accepted and isValid(self):
                 self.set_value(dialog.value)
                 self.recorded.emit(dialog.value)
@@ -259,10 +261,13 @@ def build_ui(layout, window):
     apply_button.clicked.connect(apply)
     layout.addWidget(apply_button)
     reset = QtWidgets.QPushButton('Restore Defaults')
+    reset.setToolTip('Restore the default keymaps and pie menu layout. Use Apply Keymaps to save shortcut changes.')
     def restore_defaults():
         fill(DEFAULTS)
         for action in rows:
             set_enabled(action,True)
+        from uv_straight_pie import default_layout, publish
+        publish(default_layout())
     reset.clicked.connect(restore_defaults)
     layout.addWidget(reset)
     from uv_straight_pie_preview import InlinePieEditor

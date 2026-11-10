@@ -4,6 +4,7 @@ Network and archive work never touches Maya/Qt widgets. Files are replaced on
 the GUI thread only after verification; the running modules stay loaded until
 the artist restarts Maya. No scene edits, credentials or external dependencies.
 """
+from uv_straight_language import apply as localize
 import ast
 import hashlib
 import io
@@ -25,6 +26,8 @@ from PySide6 import QtCore, QtGui, QtWidgets
 REPOSITORY = 'skazochnik3d/ShellShifter'
 REPOSITORY_URL = 'https://github.com/' + REPOSITORY
 RELEASES_URL = 'https://api.github.com/repos/' + REPOSITORY + '/releases?per_page=20'
+SUPPORTED_MAYA = ('2025', '2026', '2027')
+SUPPORTED_MAYA_MESSAGE = 'Updates support Maya 2025, 2026 and 2027.'
 CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000
 MAX_ARCHIVE = 16 * 1024 * 1024
 MAX_EXPANDED = 32 * 1024 * 1024
@@ -42,8 +45,8 @@ def version_key(version):
 
 def asset_name(version, maya):
     version_key(version)
-    if str(maya) not in ('2025', '2027'):
-        raise ValueError('Updates support Maya 2025 and 2027.')
+    if str(maya) not in SUPPORTED_MAYA:
+        raise ValueError(SUPPORTED_MAYA_MESSAGE)
     number = str(version).removeprefix('v').split('-', 1)[0]
     return 'ShellShifter_Maya{}_v{}_Install.zip'.format(maya, number)
 
@@ -130,7 +133,10 @@ def fetch_release(current, maya):
 def _runtime_path(name):
     return (bool(re.fullmatch(r'uv_straight(?:_[a-z0-9_]+)?\.py', name)) or
             name in ('shellshifter.py', 'install_shellshifter.py', 'install_uv_straight.py',
-                     'assets/shellshifter_checker_color.png'))
+                     'assets/shellshifter_checker_color.png','assets/shellshifter_checker_direction.png',
+                     'assets/shellshifter_texture_transfer.svg','assets/shellshifter_icons.png',
+                     'assets/shellshifter_logo.png',
+                     'assets/shellshifter_shelf.png'))
 
 
 def verify_archive(data, release, digest):
@@ -271,6 +277,8 @@ def _maya_parent():
 
 
 def _operations_running():
+    transfer = sys.modules.get('uv_straight_transfer_ui')
+    if transfer is not None and transfer.is_running():return True
     progress = sys.modules.get('uv_straight_pack_progress')
     if progress is not None and progress.is_running():
         return True
@@ -299,7 +307,7 @@ class UpdateManager(QtCore.QObject):
         self.latest, self.dialog, self.staged = None, None, None
         self.busy = self.started = self.closed = self.pending_restart = False
         self.notified = set()
-        self.status = 'Automatic check: on startup and every 4 hours.'
+        self.status = 'Automatic check at startup and every 4 hours.'
         self.timer = QtCore.QTimer(self)
         self.timer.setInterval(CHECK_INTERVAL_MS)
         self.timer.timeout.connect(self.check)
@@ -348,8 +356,8 @@ class UpdateManager(QtCore.QObject):
     def check(self, manual=False):
         if self.pending_restart:
             return
-        if str(self.maya) not in ('2025', '2027'):
-            self.status = 'Updates support Maya 2025 and 2027.'
+        if str(self.maya) not in SUPPORTED_MAYA:
+            self.status = SUPPORTED_MAYA_MESSAGE
             self.changed.emit()
             return
         current, maya = self.current, self.maya
@@ -385,7 +393,7 @@ class UpdateManager(QtCore.QObject):
         if self.busy or self.pending_restart or not self.latest:
             return
         if _operations_running():
-            self.status = 'Finish the current UV operation, then try again.'
+            self.status = 'Finish the current UV operation and try again.'
             self.changed.emit()
             return
         if self.staged is not None:
@@ -397,7 +405,7 @@ class UpdateManager(QtCore.QObject):
 
     def _install_staged(self):
         if _operations_running():
-            self.status = 'Download ready. Finish the current UV operation, then press Install.'
+            self.status = 'Download complete. Finish the current UV operation, then click Install.'
             return
         try:
             self.backup = install_files(self.staged, self.root, self.latest)
@@ -405,7 +413,7 @@ class UpdateManager(QtCore.QObject):
             self.staged = None
             self.status = 'Update installed. Restart Maya to finish.'
         except Exception as error:
-            self.status = 'Installation failed: ' + str(error)[:220]
+            self.status = 'Installation error: ' + str(error)[:220]
 
     def show_dialog(self):
         from shiboken6 import isValid
@@ -459,6 +467,7 @@ class UpdateManager(QtCore.QObject):
             except (RuntimeError, TypeError):
                 pass
         dialog.destroyed.connect(disconnected)
+        localize(dialog)
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -482,13 +491,11 @@ class UpdateController:
         self.button.setObjectName('checkForUpdates')
         self.button.clicked.connect(self.manager.manual_check)
         layout.addWidget(self.button)
+        self.uninstall_button = QtWidgets.QPushButton('Uninstall ShellShifter')
+        self.uninstall_button.setObjectName('uninstallShellShifter')
+        self.uninstall_button.clicked.connect(self.uninstall)
+        layout.addWidget(self.uninstall_button)
         window.shortcut_actions['check_updates'] = self.manager.manual_check
-        from uv_straight_reports import show_report
-        self.report_button = ActionButton('Report a Bug', 'report_bug')
-        self.report_button.setObjectName('reportBug')
-        self.report_button.clicked.connect(show_report)
-        layout.addWidget(self.report_button)
-        window.shortcut_actions['report_bug'] = show_report
         window.destroyed.connect(self.stop)
         self.manager.changed.connect(self.sync)
         self.sync()
@@ -497,6 +504,11 @@ class UpdateController:
     def sync(self):
         self.button.setToolTip(self.manager.status)
         self.button.setEnabled(not self.manager.busy and not self.manager.pending_restart)
+        self.uninstall_button.setEnabled(not self.manager.busy)
+
+    def uninstall(self):
+        from uv_straight_uninstall import request_uninstall
+        request_uninstall(self.manager)
 
     def stop(self, *unused):
         if self.connected:
