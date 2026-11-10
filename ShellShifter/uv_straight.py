@@ -13,7 +13,7 @@ import maya.api.OpenMaya as om
 
 WINDOW = 'uvStraightQtWindowWorkspaceControl'
 PRODUCT_NAME = 'ShellShifter'
-VERSION = '1.4.238'
+VERSION = '1.4.239'
 MARK_ATTR = 'uvStraightConstraints'
 _preview = None
 _window = None

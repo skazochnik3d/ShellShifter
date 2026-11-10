@@ -18,6 +18,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
@@ -126,8 +127,33 @@ def _read_url(url, limit):
     return bytes(content)
 
 
+def _fetch_stable_manifest(current, maya):
+    url = REPOSITORY_URL + '/releases/latest/download/ShellShifter_updates.json'
+    manifest = json.loads(_read_url(url, 65536))
+    version = manifest['version']
+    if not isinstance(version, str) or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version):
+        raise ValueError('Invalid ShellShifter release manifest version.')
+    name = asset_name(version, maya)
+    entry = manifest['assets'].get(name)
+    if entry is None:
+        return None
+    digest = entry.get('sha256')
+    if entry.get('maya') != str(maya) or not isinstance(digest, str) or not re.fullmatch(r'[0-9a-fA-F]{64}', digest):
+        raise ValueError('Invalid ShellShifter release manifest entry.')
+    tag = 'v' + version
+    asset = dict(name=name, size=entry.get('size'), digest='sha256:' + digest.lower(),
+                 browser_download_url=REPOSITORY_URL + '/releases/download/' + tag + '/' + name)
+    return choose_release([dict(tag_name=tag, assets=[asset])], current, maya)
+
+
 def fetch_release(current, maya):
-    return choose_release(json.loads(_read_url(RELEASES_URL, 2 * 1024 * 1024)), current, maya)
+    try:
+        data = _read_url(RELEASES_URL, 2 * 1024 * 1024)
+    except urllib.error.HTTPError as error:
+        if error.code not in (403, 429):
+            raise
+        return _fetch_stable_manifest(current, maya)
+    return choose_release(json.loads(data), current, maya)
 
 
 def _runtime_path(name):
