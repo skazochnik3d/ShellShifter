@@ -225,10 +225,6 @@ class MaterialController(QtCore.QObject):
         self.remove_callbacks(self.rename_callbacks)
         self.dirty = False
         self.steps = scan()
-        self.list.setEnabled(False)
-        self.refresh_button.setEnabled(False)
-        self.status.setText('Reading materials…')
-        self.status.show()
         self.timer.start(0)
 
     def advance(self):
@@ -247,8 +243,6 @@ class MaterialController(QtCore.QObject):
             return
         except Exception as error:
             self.cancel_scan()
-            self.list.setEnabled(True)
-            self.refresh_button.setEnabled(True)
             self.status.setText(str(error))
             self.status.show()
             return
@@ -257,18 +251,22 @@ class MaterialController(QtCore.QObject):
     def replace_records(self, records):
         current = self.list.currentData()
         selected = current.uuid if current is not None else None
-        self.records = records = tuple(sorted(records, key=lambda record: (sort_key(record.name), record.uuid)))
+        records = tuple(sorted(records, key=lambda record: (sort_key(record.name), record.uuid)))
+        same_items = tuple((record.uuid, record.name) for record in self.records) == tuple(
+            (record.uuid, record.name) for record in records)
+        self.records = records
         with signals_blocked(self.list):
-            self.list.clear()
-            for record in records:
-                self.list.addItem(record.name, record)
-                self.list.setItemData(self.list.count()-1,
+            if not same_items:
+                self.list.clear()
+            for index, record in enumerate(records):
+                if same_items:
+                    self.list.setItemData(index, record)
+                else:
+                    self.list.addItem(record.name, record)
+                self.list.setItemData(index,
                     '{}\nObjects: {} · UV sets: {}'.format(record.name, record.objects, ', '.join(record.uv_sets)),
                     QtCore.Qt.ToolTipRole)
             self.list.setCurrentIndex(next((i for i, record in enumerate(records) if record.uuid == selected), -1))
-        self.list.setEnabled(True)
-        self.refresh_button.setEnabled(True)
-        self.resize_list()
         for record in records:
             try:
                 nodes = om.MSelectionList()
@@ -280,11 +278,11 @@ class MaterialController(QtCore.QObject):
         self.empty.setVisible(not records)
         self.status.setText('{} material{}'.format(len(records), '' if len(records) == 1 else 's'))
         self.status.hide()
-        self.adjust_size()
-        self.update_textures()
-
-    def resize_list(self):
-        self.adjust_size()
+        if same_items:
+            self.textures.check_dirty()
+        else:
+            self.adjust_size()
+            self.update_textures()
 
     def adjust_size(self):
         if hasattr(self.window, 'adjust_popup_size'):
