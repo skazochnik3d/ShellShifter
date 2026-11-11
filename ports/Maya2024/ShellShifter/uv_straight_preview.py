@@ -1032,6 +1032,12 @@ class PopupWindow(QtWidgets.QDialog):
 
 
 def show_window(popup=False):
+    from uv_straight_native import _no_undo
+    with _no_undo():
+        return _build_window(popup)
+
+
+def _build_window(popup):
     global _startup_defaults_applied
     import uv_straight as uv
     from functools import partial
