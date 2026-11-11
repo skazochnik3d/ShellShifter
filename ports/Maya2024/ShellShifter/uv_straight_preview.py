@@ -16,6 +16,7 @@ DOCK_CONTROL = 'uvStraightQtWindowWorkspaceControl'
 UV_TOOLKIT_CONTROL = 'UVToolkitDockControl'
 POPUP_OBJECT = 'uvStraightQtPopup'
 _popup = globals().get('_popup')
+_exit_callback = globals().get('_exit_callback')
 _startup_defaults_applied = globals().get('_startup_defaults_applied', False)
 SECTION_DEFINITIONS = (
     ('unwrap', 'Unwrap', True), ('packing', 'Packing', False),
@@ -1031,8 +1032,67 @@ class PopupWindow(QtWidgets.QDialog):
         super().closeEvent(event)
 
 
+def _shutdown_shellshifter(*unused):
+    import gc
+    import sys
+    from shiboken2 import isValid
+    import uv_straight as uv
+    from uv_straight_native import _no_undo, disable
+
+    global _popup
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        return
+
+    # Release Python-owned Qt objects before Maya tears down PySide.
+    with _no_undo():
+        updates = sys.modules.get('uv_straight_updates')
+        manager = getattr(updates, '_manager', None)
+        if manager is not None:
+            manager.stop()
+            if manager.dialog is not None and isValid(manager.dialog):
+                manager.dialog.reject()
+            manager.deleteLater()
+            updates._manager = None
+
+        for widget in app.allWidgets():
+            if isValid(widget) and widget.objectName() in ('uvStraightQtWindow', POPUP_OBJECT):
+                widget.close()
+                widget.deleteLater()
+        _popup = uv._window = None
+
+        for name, method in (
+                ('uv_straight_texel_ui', 'stop_display'),
+                ('uv_straight_groups_ui', 'stop_display'),
+                ('uv_straight_group_visibility', 'stop'),
+                ('uv_straight_texture_reload', 'stop')):
+            module = sys.modules.get(name)
+            if module is not None:
+                getattr(module, method)()
+
+        disable()
+        menu = sys.modules.get('uv_straight_menu')
+        manager = getattr(menu, '_manager', None)
+        if manager is not None:
+            menu.uninstall()
+            manager.deleteLater()
+        shortcuts = sys.modules.get('uv_straight_custom_keymaps')
+        manager = getattr(shortcuts, '_manager', None)
+        if manager is not None:
+            manager.stop()
+            manager.deleteLater()
+            shortcuts._manager = None
+
+    QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+    gc.collect()
+
+
 def show_window(popup=False):
     from uv_straight_native import _no_undo
+    global _exit_callback
+    if _exit_callback is None and not cmds.about(batch=True):
+        from maya.api.OpenMaya import MSceneMessage
+        _exit_callback = MSceneMessage.addCallback(MSceneMessage.kMayaExiting, _shutdown_shellshifter)
     with _no_undo():
         return _build_window(popup)
 
