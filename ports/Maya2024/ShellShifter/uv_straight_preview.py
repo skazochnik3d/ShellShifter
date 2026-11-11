@@ -2015,7 +2015,7 @@ def _build_window(popup):
             preview_timer.stop()
 
     for key, toggle in preview_toggles.items():
-        toggle.clicked.connect(partial(queue_preview, key=key))
+        toggle.clicked[bool].connect(partial(queue_preview, key=key))
     display_pages['checker'].layout().addWidget(checker_group)
     layout = window.sections['checks'].content
     import uv_straight_check_ui
