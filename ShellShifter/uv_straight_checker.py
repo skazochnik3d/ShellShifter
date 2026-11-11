@@ -12,6 +12,8 @@ import maya.api.OpenMaya as om
 STATE = 'uvStraightCheckerState'
 NODES = 'uvStraightCheckerNodes'
 ORIGINAL = 'uvStraightOriginalMaterial'
+PREVIEW_SHADER = 'uvStraightPreviewShader'
+VISIBILITY_OPTION = 'shellShifterDisplayChecker'
 # Scene-linear greys: softer contrast than pure black/white in the viewport.
 CHECKER_DARK = (.22, .22, .22)
 CHECKER_LIGHT = (.55, .55, .55)
@@ -189,6 +191,54 @@ def _snapshot(shape):
             'defaultUV': fn.getUVSetNames()[0] == fn.currentUVSetName() == 'map1'}
 
 
+def visible():
+    return not cmds.optionVar(exists=VISIBILITY_OPTION) or bool(cmds.optionVar(query=VISIBILITY_OPTION))
+
+
+def _checker_shader(group):
+    saved = group + '.' + PREVIEW_SHADER
+    if cmds.objExists(saved):
+        return cmds.listConnections(saved, source=True, destination=False) or []
+    return cmds.listConnections(group + '.surfaceShader', source=True, destination=False) or []
+
+
+def _set_group_visibility(value):
+    for group in cmds.ls(type='shadingEngine') or []:
+        if not cmds.attributeQuery(ORIGINAL, node=group, exists=True):
+            continue
+        original = cmds.listConnections(group + '.' + ORIGINAL, source=True, destination=False) or []
+        shaders = _checker_shader(group)
+        if not original or not shaders:
+            continue
+        shader = shaders[0]
+        saved = group + '.' + PREVIEW_SHADER
+        if value and not cmds.objExists(saved):
+            continue
+        if not value and not cmds.objExists(saved):
+            cmds.addAttr(group, longName=PREVIEW_SHADER, attributeType='message', hidden=True)
+            cmds.connectAttr(shader + '.message', saved)
+        for slot in ('surfaceShader', 'volumeShader', 'displacementShader'):
+            target = group + '.' + slot
+            old = cmds.connectionInfo(target, sourceFromDestination=True)
+            if value:
+                new = shader + '.outColor' if slot == 'surfaceShader' else ''
+            else:
+                new = cmds.connectionInfo(original[0] + '.' + slot, sourceFromDestination=True)
+            if old == new:
+                continue
+            if new:
+                cmds.connectAttr(new, target, force=True)
+            elif old:
+                cmds.disconnectAttr(old, target)
+
+
+def set_visible(value):
+    from uv_straight_native import _no_undo
+    with _no_undo():
+        _set_group_visibility(value)
+    cmds.optionVar(intValue=(VISIBILITY_OPTION, int(value)))
+
+
 def _helpers(shape, group_cache=None):
     nodes = set(cmds.listConnections(shape+'.'+NODES, source=True, destination=False) or []) if cmds.attributeQuery(NODES, node=shape, exists=True) else set()
     # Duplicates may share SG memberships without copying message connections.
@@ -198,7 +248,7 @@ def _helpers(shape, group_cache=None):
             graph = set()
             if cmds.attributeQuery(ORIGINAL,node=sg,exists=True):
                 graph.add(sg)
-                for shader in cmds.listConnections(sg+'.surfaceShader',source=True,destination=False) or []:
+                for shader in _checker_shader(sg):
                     graph.add(shader)
                     for kind in ('checker', 'file'):
                         for texture in cmds.listConnections(shader+'.outColor',source=True,destination=False,type=kind) or []:
@@ -220,7 +270,7 @@ def _preview_network(shape, cache=None):
         return cache[groups]
     preview_groups = [sg for sg in groups if cmds.attributeQuery(ORIGINAL, node=sg, exists=True)]
     materials = {node for sg in preview_groups for node in
-                 (cmds.listConnections(sg+'.surfaceShader', source=True, destination=False) or [])}
+                 _checker_shader(sg)}
     if len(materials) == 1:
         shader = materials.pop()
         textures = [node for node in (cmds.listConnections(shader+'.outColor', source=True, destination=False) or [])
@@ -349,6 +399,8 @@ def _detach_network(shape):
     for index, node in enumerate(helpers):
         cmds.connectAttr(node+'.message', '{}.{}[{}]'.format(shape, NODES, index))
     _link_uv_set(shape, texture, _state(shape)['uvSet'])
+    if not visible():
+        _set_group_visibility(False)
     cmds.select(selection, replace=True)
 
 
@@ -475,6 +527,8 @@ def apply(tiles=16, style=None, *, existing_only=False):
                         cmds.setAttr(shape+'.displayColors', False)
             for sg, components in memberships.items():
                 cmds.sets(components, edit=True, forceElement=sg)
+            if not visible():
+                _set_group_visibility(False)
         finally:
             cmds.select(selection, replace=True)
     if not cmds.about(batch=True):
@@ -501,6 +555,9 @@ def _owns_preview(shader, shapes):
     """Include actual SG owners, even when duplicate meshes lack message links."""
     groups = cmds.listConnections(shader+'.outColor', source=False, destination=True,
                                   type='shadingEngine') or []
+    groups += [plug.split('.', 1)[0] for plug in
+               (cmds.listConnections(shader + '.message', source=False, destination=True, plugs=True) or [])
+               if plug.endswith('.' + PREVIEW_SHADER)]
     assigned = [member for sg in set(groups) for member in (cmds.sets(sg, query=True) or [])]
     owners = set(cmds.ls(assigned, objectsOnly=True, long=True) or []) if assigned else set()
     mesh_owners = set(cmds.ls(list(owners), dag=True, type='mesh', long=True,

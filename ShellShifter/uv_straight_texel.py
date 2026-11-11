@@ -289,9 +289,20 @@ def viewport_color_payload(groups,contrast=1.):
     return payload
 
 
+def visible():
+    option = 'shellShifterDisplayTexel'
+    return not cmds.optionVar(exists=option) or bool(cmds.optionVar(query=option))
+
+
+def set_visible(value):
+    cmds.optionVar(intValue=('shellShifterDisplayTexel', int(value)))
+    if not value:
+        clear()
+
+
 def show(groups,contrast=1.):
     import uv_straight_native as native
-    payload = viewport_color_payload(groups,contrast)
+    payload = viewport_color_payload(groups,contrast) if visible() else []
     if payload:
         native.set_viewport_overlay(payload, 'texel_density')
     else:
