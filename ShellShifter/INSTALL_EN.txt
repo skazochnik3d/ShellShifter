@@ -1,4 +1,4 @@
-ShellShifter 1.4.241 — installation for Maya 2027
+ShellShifter 1.4.242 — installation for Maya 2027
 ==================================================
 
 Requirements
@@ -24,7 +24,7 @@ Open Windows > General Editors > Script Editor, select its Python tab and
 run the following code, replacing the example with your extracted folder:
 
     import runpy
-    folder = r'C:\path\to\ShellShifter_1.4.241'
+    folder = r'C:\path\to\ShellShifter_1.4.242'
     runpy.run_path(folder + '/install_shellshifter.py')['onMayaDroppedPythonFile']()
 
 This runs the same installer, adds the shelf button and opens the panel.

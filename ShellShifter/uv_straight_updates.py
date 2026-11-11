@@ -1,13 +1,14 @@
 """Public GitHub releases, background checks and verified, reversible updates.
 
 Network and archive work never touches Maya/Qt widgets. Files are replaced on
-the GUI thread only after verification; the running modules stay loaded until
-the artist restarts Maya. No scene edits, credentials or external dependencies.
+the GUI thread only after verification. Compatible UI updates reopen the panel
+in the same Maya session. No scene edits, credentials or external dependencies.
 """
 from uv_straight_language import apply as localize
 import ast
 import hashlib
 import io
+import importlib
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -305,7 +306,32 @@ def _maya_parent():
     return wrapInstance(int(pointer), QtWidgets.QWidget) if pointer else None
 
 
+def _can_reload_in_session(runtime, root, current):
+    # Leave Maya's registered commands and shared scene state alive for Undo.
+    reloadable = {'uv_straight_updates.py', 'uv_straight_preview.py'}
+    try:
+        installed = json.loads((root/'ShellShifter_update_manifest.json').read_bytes())
+        if installed['version'] != current or set(installed['files']) != set(runtime):
+            return False
+        for name, incoming in runtime.items():
+            previous = (root/name).read_bytes()
+            if previous == incoming or name in reloadable:
+                continue
+            if name != 'uv_straight.py':
+                return False
+            version_line = rb'^VERSION = [^\r\n]+'
+            if re.sub(version_line, b'VERSION', previous, flags=re.M) != re.sub(
+                    version_line, b'VERSION', incoming, flags=re.M):
+                return False
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    return True
+
+
 def _operations_running():
+    picker = sys.modules.get('uv_straight_pack_target')
+    if picker is not None and picker.active is not None:
+        return True
     transfer = sys.modules.get('uv_straight_transfer_ui')
     if transfer is not None and transfer.is_running():return True
     progress = sys.modules.get('uv_straight_pack_progress')
@@ -434,12 +460,59 @@ class UpdateManager(QtCore.QObject):
             self.status = 'Download complete. Finish the current UV operation, then click Install.'
             return
         try:
+            reload_now = _can_reload_in_session(self.staged, self.root, self.current)
             self.backup = install_files(self.staged, self.root, self.latest)
             self.pending_restart = True
             self.staged = None
             self.status = 'Update installed. Restart Maya to finish.'
+            if reload_now:
+                self.status = 'Update installed. Reopening ShellShifter…'
+                menu = sys.modules.get('uv_straight_menu')
+                if menu is None:
+                    QtCore.QTimer.singleShot(0, self._reload_in_session)
+                else:
+                    menu.after_menu_interaction(self._reload_in_session)
         except Exception as error:
             self.status = 'Installation error: ' + str(error)[:220]
+
+    def _reload_in_session(self):
+        if self.closed:
+            return
+        if _operations_running():
+            self.status = 'Update installed. Restart Maya to finish.'
+            self.changed.emit()
+            return
+        import uv_straight as uv
+        previous = uv.VERSION
+        try:
+            preview = sys.modules.get('uv_straight_preview')
+            popup = getattr(preview, '_popup', None)
+            if popup is not None:
+                popup.close()
+                preview._popup = None
+
+            # A replacement of equal length can share a .pyc timestamp.
+            for name in ('uv_straight_updates.py', 'uv_straight_preview.py'):
+                Path(importlib.util.cache_from_source(str(self.root/name))).unlink(missing_ok=True)
+            importlib.invalidate_caches()
+            self.stop()
+            uv.VERSION = self.latest['version']
+            updated = importlib.reload(sys.modules[__name__])
+            if preview is not None:
+                uv._window = importlib.reload(preview).show_window()
+            else:
+                updated.manager().start()
+        except Exception as error:
+            uv.VERSION = previous
+            replacement = globals().get('_manager')
+            if replacement is not None and replacement is not self:
+                replacement.stop()
+            self.status = 'Update installed. Restart Maya to finish: ' + str(error)[:160]
+            self.changed.emit()
+            return
+        if self.dialog is not None:
+            self.dialog.reject()
+        self.deleteLater()
 
     def show_dialog(self):
         from shiboken6 import isValid

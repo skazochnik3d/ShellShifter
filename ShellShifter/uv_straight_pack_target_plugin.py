@@ -3,7 +3,9 @@ import maya.OpenMayaMPx as mpx
 import maya.OpenMayaUI as omui
 
 class TileContext(mpx.MPxTexContext):
-    def toolOnSetup(self,*args):self.setHelpString('ShellShifter: click a UV tile. Esc/right click cancels.')
+    def toolOnSetup(self, *args):
+        self._setHelpString('ShellShifter: click a UV tile. Esc/right click cancels.')
+
     def doPress(self,event):
         import uv_straight_pack_target as target
         if target.active is None:return
@@ -31,7 +33,7 @@ def creator():
 
 
 def initializePlugin(obj):
-    mpx.MFnPlugin(obj,'ShellShifter','1.4.241','Any').registerContextCommand('shellShifterPickUVTileContext',creator)
+    mpx.MFnPlugin(obj,'ShellShifter','1.4.242','Any').registerContextCommand('shellShifterPickUVTileContext',creator)
 
 
 def uninitializePlugin(obj):mpx.MFnPlugin(obj).deregisterContextCommand('shellShifterPickUVTileContext')
