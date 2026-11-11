@@ -306,9 +306,16 @@ def _maya_parent():
     return wrapInstance(int(pointer), QtWidgets.QWidget) if pointer else None
 
 
+_RELOADABLE_PANEL_MODULES = (
+    'uv_straight_language', 'uv_straight_pack_ui', 'uv_straight_material_texture_ui',
+    'uv_straight_material_ui', 'uv_straight_check_ui', 'uv_straight_preview',
+    'uv_straight_updates',
+)
+
+
 def _can_reload_in_session(runtime, root, current):
     # Leave Maya's registered commands and shared scene state alive for Undo.
-    reloadable = {'uv_straight_updates.py', 'uv_straight_preview.py'}
+    reloadable = {name + '.py' for name in _RELOADABLE_PANEL_MODULES}
     try:
         installed = json.loads((root/'ShellShifter_update_manifest.json').read_bytes())
         if installed['version'] != current or set(installed['files']) != set(runtime):
@@ -492,16 +499,23 @@ class UpdateManager(QtCore.QObject):
                 preview._popup = None
 
             # A replacement of equal length can share a .pyc timestamp.
-            for name in ('uv_straight_updates.py', 'uv_straight_preview.py'):
-                Path(importlib.util.cache_from_source(str(self.root/name))).unlink(missing_ok=True)
+            for name in _RELOADABLE_PANEL_MODULES:
+                source = self.root / (name + '.py')
+                Path(importlib.util.cache_from_source(str(source))).unlink(missing_ok=True)
             importlib.invalidate_caches()
             self.stop()
             uv.VERSION = self.latest['version']
-            updated = importlib.reload(sys.modules[__name__])
+            # Reload the changed leaf controllers before rebuilding the panel.
+            for name in _RELOADABLE_PANEL_MODULES:
+                module = sys.modules.get(name)
+                if module is not None and (name in ('uv_straight_updates', 'uv_straight_preview') or
+                                           (self.backup / (name + '.py')).read_bytes() !=
+                                           (self.root / (name + '.py')).read_bytes()):
+                    importlib.reload(module)
             if preview is not None:
-                uv._window = importlib.reload(preview).show_window()
+                uv._window = preview.show_window()
             else:
-                updated.manager().start()
+                manager().start()
         except Exception as error:
             uv.VERSION = previous
             replacement = globals().get('_manager')
@@ -546,9 +560,11 @@ class UpdateManager(QtCore.QObject):
         title = label('ShellShifter Update', 'Обновление ShellShifter')
         dialog.setWindowTitle(title)
         dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose)
+        dialog.setAttribute(QtCore.Qt.WA_TranslucentBackground)
         dialog.setMinimumWidth(410)
         dialog.setStyleSheet(
-            'QDialog#ShellShifterUpdateDialog {background:#303030;border:1px solid #555;}'
+            'QDialog#ShellShifterUpdateDialog {background:transparent;}'
+            'QFrame#updatePanel {background:#303030;border:1px solid #555;border-radius:12px;}'
             'QLabel {color:#dedede;background:transparent;}'
             'QLabel#updateTitle {font-size:14px;font-weight:600;}'
             'QLabel#updateVersion {color:#bcbcbc;}'
@@ -560,7 +576,12 @@ class UpdateManager(QtCore.QObject):
             'QPushButton#updateInstall:hover {background:#dcece8;}'
             'QPushButton#updateInstall:pressed {background:#aec7c1;}'
             'QPushButton#updateInstall:disabled {background:#424242;color:#999;}')
-        layout = QtWidgets.QVBoxLayout(dialog)
+        outer = QtWidgets.QVBoxLayout(dialog)
+        outer.setContentsMargins(0, 0, 0, 0)
+        panel = QtWidgets.QFrame()
+        panel.setObjectName('updatePanel')
+        outer.addWidget(panel)
+        layout = QtWidgets.QVBoxLayout(panel)
         layout.setContentsMargins(12, 10, 12, 12)
         layout.setSpacing(8)
         header = QtWidgets.QHBoxLayout()

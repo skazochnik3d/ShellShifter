@@ -1297,7 +1297,7 @@ def show_window(popup=False):
     done_row = QtWidgets.QHBoxLayout()
     layout.addLayout(done_row)
     from uv_straight_icons import icon as action_icon
-    mark_done_button = button('Mark Done', partial(uv.mark_done, True), done_row, compact=True)
+    mark_done_button = button("Mark Done UV's", partial(uv.mark_done, True), done_row, compact=True)
     mark_done_button.setToolTip(
         'Mark selected meshes as done. Show Done displays them in green. The mark is saved in the scene.')
     clear_done_button = button('Clear Done', partial(uv.mark_done, False), done_row, compact=True)
@@ -1664,10 +1664,19 @@ def show_window(popup=False):
     distortion_toggle.setChecked(bool(cmds.optionVar(query='uvStraightDistortion'))
                                  if cmds.optionVar(exists='uvStraightDistortion') else False)
     display_grid.addWidget(distortion_toggle,1,0)
-    finished_toggle = VisibleCheckBox('Show Done')
+    finished_toggle = VisibleCheckBox("Done UV's")
     finished_toggle.setObjectName('finishedUnwrapMeshesToggle')
     finished_toggle.setToolTip('Show green completion colors on marked meshes. Turning this off keeps their marks.')
     display_grid.addWidget(finished_toggle,1,1)
+    texel_toggle = VisibleCheckBox('Texel')
+    texel_toggle.setObjectName('displayTexelToggle')
+    texel_toggle.setToolTip('Show texel-density colors on the selected meshes.')
+    display_grid.addWidget(texel_toggle,2,0)
+    checker_toggle = VisibleCheckBox('Checker')
+    checker_toggle.setObjectName('displayCheckerToggle')
+    checker_toggle.setToolTip('Apply or remove the current checker on the selected meshes.')
+    display_grid.addWidget(checker_toggle,2,1)
+
 
     distortion_legend = DistortionScale()
     distortion_legend.setObjectName('distortionLegend')
@@ -1889,6 +1898,40 @@ def show_window(popup=False):
         'Show texel density on selected meshes. Colors and groups update after UV edits, geometry changes and Undo/Redo until Clear Color is clicked.')
     button('Clear Color',window.texel_display.clear,texel_buttons).setToolTip(
         'Clear texel-density colors from the viewport.')
+    def sync_texel(*unused):
+        with QtCore.QSignalBlocker(texel_toggle):
+            texel_toggle.setChecked(window.texel_display.model.active)
+
+    def sync_checker(*unused):
+        if not checker_toggle.isVisible():
+            return
+        try:
+            checked = all(cmds.attributeQuery(checker.STATE, node=shape, exists=True)
+                          for shape in checker._meshes())
+        except (RuntimeError, ValueError):
+            checked = False
+        with QtCore.QSignalBlocker(checker_toggle):
+            checker_toggle.setChecked(checked)
+
+    def toggle_texel(checked):
+        uv._run(window.texel_display.analyse if checked else window.texel_display.clear)
+        sync_texel()
+
+    def toggle_checker(checked):
+        if checked:
+            uv._run(lambda: checker.apply(tiles.value(), checker_style.currentData()))
+        else:
+            uv._run(checker.remove)
+        sync_checker()
+
+    texel_toggle.clicked.connect(toggle_texel)
+    sync_texel()
+    checker_toggle.clicked.connect(toggle_checker)
+    checker_state_timer = QtCore.QTimer(checker_toggle)
+    checker_state_timer.setInterval(500)
+    checker_state_timer.timeout.connect(sync_checker)
+    checker_state_timer.timeout.connect(sync_texel)
+    checker_state_timer.start()
     display_pages['checker'].layout().addWidget(checker_group)
     layout = window.sections['checks'].content
     import uv_straight_check_ui
