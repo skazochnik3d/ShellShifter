@@ -61,7 +61,8 @@ class DisplayDisclosureButton(QtWidgets.QPushButton):
         self.setStyleSheet(
             'QPushButton {background:#4b4b4b;border-radius:7px;padding:4px 23px;}'
             'QPushButton:hover {background:#585858;}'
-            'QPushButton:checked {background:#5a5a5a;}')
+            'QPushButton:checked {background:#cfe1dc;color:#17292b;}'
+            'QPushButton:checked:hover {background:#dcebe7;}')
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -1762,7 +1763,7 @@ def show_window(popup=False):
         axis_button.setObjectName('pinAxis' + axis)
         axis_button.setCheckable(True)
         axis_button.setToolTip(
-            'Click an edge to add or remove pins. H or V forces that pin axis. Both on detect the axis automatically. Both off disables edge clicks; Shift + wheel still assigns pins by angle.')
+            'Click an edge to toggle pins.\nH/V: choose axis. Both: auto. Neither: off.\nShift + wheel: pin by angle.')
         axis_button.setStyleSheet(
             'QPushButton { background: #4b4b4b; border-radius: 9px; padding:0; min-height:29px; max-height:29px; }'
             'QPushButton:checked { background: ' + COLORS[axis] +

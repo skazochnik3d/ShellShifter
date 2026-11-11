@@ -459,7 +459,7 @@ class ErrorCheckController(QtCore.QObject):
 
     def populate_results(self):
         groups = self._result_groups(self.report.findings)
-        row_height = self.results.fontMetrics().lineSpacing() * 2 + 16
+        row_height = self.results.fontMetrics().lineSpacing() + 10
         with QtCore.QSignalBlocker(self.results):
             self.results.clear()
             for group in groups:
@@ -473,14 +473,14 @@ class ErrorCheckController(QtCore.QObject):
                 elif len(group) > 1:
                     label = '{} · {} pairs'.format(
                         'Stack mismatch' if first.kind == 'mismatch' else 'Overlap group', len(group))
-                item = QtWidgets.QListWidgetItem(label + '\n' + names)
+                item = QtWidgets.QListWidgetItem(label + ' · ' + names)
                 item.setData(QtCore.Qt.UserRole, group)
                 item.setSizeHint(QtCore.QSize(0, row_height))
                 item.setToolTip(label + '\n' + '\n'.join(dict.fromkeys(
                     shell.shape for finding in (group if first.kind == 'fold' else (first,))
                     for shell in finding.shells)))
                 self.results.addItem(item)
-        self.results.setFixedHeight(min(5, max(1, len(groups))) * row_height + 8)
+        self.results.setFixedHeight(min(5, max(1, len(groups))) * row_height + 4)
         self.results.setVisible(bool(groups))
         self.navigation.setEnabled(True)
         folds = sum(finding.kind == 'fold' for finding in self.report.findings)
@@ -733,7 +733,28 @@ class ErrorCheckController(QtCore.QObject):
         return bounds
 
     @staticmethod
-    def _frame_uv_bounds(editors,bounds):
+    def _frame_uv_bounds(editors, bounds):
+        # The helper temporarily replaces the editor content. Hold Qt paints
+        # until Maya restores the original UV display connections.
+        import maya.OpenMayaUI as omui
+        from shiboken6 import wrapInstance
+        held = []
+        try:
+            for editor in editors:
+                name = cmds.textureWindow(editor, query=True, control=True)
+                pointer = omui.MQtUtil.findControl(name) if name else None
+                if pointer:
+                    widget = wrapInstance(int(pointer), QtWidgets.QWidget)
+                    if widget.updatesEnabled():
+                        widget.setUpdatesEnabled(False)
+                        held.append(widget)
+            ErrorCheckController._frame_uv_bounds_native(editors, bounds)
+        finally:
+            for widget in held:
+                widget.setUpdatesEnabled(True)
+
+    @staticmethod
+    def _frame_uv_bounds_native(editors,bounds):
         """Native Frame Selected on an ephemeral rectangle, with exact cleanup.
 
         Maya exposes no absolute UV view rectangle setter. A private selection

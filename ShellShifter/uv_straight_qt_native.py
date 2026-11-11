@@ -1139,11 +1139,15 @@ class QtAnnotations(QtCore.QObject):
                     cmds.setAttr(shape + '.' + attr, json.dumps(state), type='string')
                 else:
                     state = json.loads(dependency.findPlug(attr, False).asString())
+                if (state['set'] in sets and state['set'].startswith('uvStraightPreview_')
+                        and fn.getColorRepresentation(state['set']) != om.MFnMesh.kRGB):
+                    cmds.polyColorSet(shape, delete=True, colorSet=state['set'])
+                    sets.remove(state['set'])
                 write_colors = (self.viewport_face_cache.get(shape) != faces or
                                 state['set'] not in sets)
                 if state['set'] not in sets:
                     cmds.polyColorSet(shape, create=True, colorSet=state['set'],
-                                      representation='RGBA')
+                                      representation='RGB')
                 if fn.currentColorSetName() != state['set']:
                     cmds.polyColorSet(shape, currentColorSet=True, colorSet=state['set'])
                 if write_colors:
@@ -1158,7 +1162,7 @@ class QtAnnotations(QtCore.QObject):
                                          0 <= face < polygon_count)
                     if changed_ids:
                         colors = om.MColorArray([faces[face] for face in changed_ids])
-                        fn.setFaceColors(colors, om.MIntArray(changed_ids))
+                        fn.setFaceColors(colors, om.MIntArray(changed_ids), om.MFnMesh.kRGB)
                     self.viewport_face_cache[shape] = dict(faces)
                 plugs['displayColors'].setBool(True)
                 # Modulate2X makes neutral .5 invisible over the assigned

@@ -285,11 +285,18 @@ def set_slots_visible(slots, visible):
     if not plans:
         return
     from uv_straight import _undo
-    with _undo('ShellShifter Show Texture' if visible else 'ShellShifter Hide Texture'):
-        for material in dict.fromkeys(material for material, _ in plans):
-            _end_preview(preview_groups(material))
-        for material, row in plans:
-            move_slot_connection(material, row, visible)
+    interactive = not cmds.about(batch=True)
+    if interactive:
+        cmds.refresh(suspend=True)
+    try:
+        with _undo('ShellShifter Show Texture' if visible else 'ShellShifter Hide Texture'):
+            for material in dict.fromkeys(material for material, _ in plans):
+                _end_preview(preview_groups(material))
+            for material, row in plans:
+                move_slot_connection(material, row, visible)
+    finally:
+        if interactive:
+            cmds.refresh(suspend=False)
 
 
 def move_slot_connection(material, row, visible):
