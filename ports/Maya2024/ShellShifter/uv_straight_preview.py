@@ -1964,40 +1964,58 @@ def _build_window(popup):
         'Show texel density on selected meshes. Colors and groups update after UV edits, geometry changes and Undo/Redo until Clear Color is clicked.')
     button('Clear Color',window.texel_display.clear,texel_buttons).setToolTip(
         'Clear texel-density colors from the viewport.')
-    def sync_texel(*unused):
-        with signals_blocked(texel_toggle):
-            texel_toggle.setChecked(window.texel_display.model.active)
+    preview_options = {
+        'texel': 'shellShifterDisplayTexel',
+        'checker': 'shellShifterDisplayChecker',
+    }
+    preview_toggles = {'texel': texel_toggle, 'checker': checker_toggle}
+    pending_previews = {}
+    for key, toggle in preview_toggles.items():
+        option = preview_options[key]
+        toggle.setChecked(not cmds.optionVar(exists=option) or bool(cmds.optionVar(query=option)))
 
-    def sync_checker(*unused):
-        if not checker_toggle.isVisible():
-            return
+    def apply_preview(key, checked):
+        if key == 'texel' and not checked:
+            uv._run(window.texel_display.clear)
+            return True
         try:
-            checked = all(cmds.attributeQuery(checker.STATE, node=shape, exists=True)
-                          for shape in checker._meshes())
+            checker._meshes()
         except (RuntimeError, ValueError):
-            checked = False
-        with signals_blocked(checker_toggle):
-            checker_toggle.setChecked(checked)
-
-    def toggle_texel(checked):
-        uv._run(window.texel_display.analyse if checked else window.texel_display.clear)
-        sync_texel()
-
-    def toggle_checker(checked):
-        if checked:
+            return False
+        if key == 'texel':
+            uv._run(window.texel_display.analyse)
+        elif checked:
             uv._run(lambda: checker.apply(tiles.value(), checker_style.currentData()))
         else:
             uv._run(checker.remove)
-        sync_checker()
+        return True
 
-    texel_toggle.clicked.connect(toggle_texel)
-    sync_texel()
-    checker_toggle.clicked.connect(toggle_checker)
-    checker_state_timer = QtCore.QTimer(checker_toggle)
-    checker_state_timer.setInterval(500)
-    checker_state_timer.timeout.connect(sync_checker)
-    checker_state_timer.timeout.connect(sync_texel)
-    checker_state_timer.start()
+    def toggle_preview(checked, key):
+        cmds.optionVar(intValue=(preview_options[key], int(checked)))
+        pending_previews.pop(key, None)
+        if not apply_preview(key, checked) and checked:
+            pending_previews[key] = checked
+
+    def apply_pending_previews():
+        for key, checked in tuple(pending_previews.items()):
+            if apply_preview(key, checked):
+                pending_previews.pop(key, None)
+        if not pending_previews:
+            preview_timer.stop()
+
+    preview_timer = QtCore.QTimer(window)
+    preview_timer.setInterval(300)
+    preview_timer.timeout.connect(apply_pending_previews)
+
+    def queue_preview(checked, key):
+        toggle_preview(checked, key)
+        if pending_previews:
+            preview_timer.start()
+        else:
+            preview_timer.stop()
+
+    for key, toggle in preview_toggles.items():
+        toggle.clicked.connect(partial(queue_preview, key=key))
     display_pages['checker'].layout().addWidget(checker_group)
     layout = window.sections['checks'].content
     import uv_straight_check_ui
