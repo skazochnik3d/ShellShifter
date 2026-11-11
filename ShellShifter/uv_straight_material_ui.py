@@ -74,19 +74,24 @@ class MaterialController(QtCore.QObject):
         header_row.insertWidget(header_row.indexOf(section.pin), self.refresh_button)
         self.refresh_button.setStyleSheet('QToolButton { padding: 0; border-radius: 5px; } '
                                          'QToolButton:hover { background: #525252; }')
-        self.list = QtWidgets.QListWidget()
+        self.list = QtWidgets.QComboBox()
         self.list.setObjectName('materialPicker')
+        self.list.setMinimumWidth(0)
+        self.list.setFixedHeight(29)
+        self.list.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.list.setMinimumContentsLength(1)
+        self.list.setMaxVisibleItems(16)
+        self.list.setPlaceholderText('Select material…')
         self.list.setAccessibleName('Assigned materials')
-        self.list.setToolTip('Choose a material to select its UVs and view its textures.')
-        self.list.setUniformItemSizes(True)
-        self.list.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.list.setToolTip("Choose a material to select its UVs and view its textures.")
         self.list.setStyleSheet(
-            'QListWidget {background:#292929;color:#eee;border:1px solid #555;border-radius:5px;}'
-            'QListWidget::item {padding:4px 8px;}'
-            'QListWidget::item:selected {background:#cfe1dc;color:#17292b;}')
-        self.drop_viewport = self.list.viewport()
-        self.list.currentItemChanged.connect(self.queue_selection)
-        self.list.itemClicked.connect(self.queue_selection)
+            'QComboBox {background:#292929;color:#f0f0f0;border:1px solid #5b5b5b;'
+            'border-radius:5px;padding:0 8px;min-height:27px;max-height:27px;}'
+            'QComboBox::drop-down {border:0;width:24px;}'
+            'QComboBox QAbstractItemView {background:#292929;color:#eeeeee;'
+            'border:1px solid #666666;selection-background-color:#cfe1dc;selection-color:#17292b;}')
+        self.drop_viewport = self.list
+        self.list.activated.connect(self.queue_selection)
         body.addWidget(self.list)
         self.empty = QtWidgets.QLabel('No materials with UVs found.')
         self.empty.setWordWrap(True)
@@ -249,18 +254,17 @@ class MaterialController(QtCore.QObject):
         self.timer.start(1)
 
     def replace_records(self, records):
-        current = self.current_record()
+        current = self.list.currentData()
         selected = current.uuid if current is not None else None
         self.records = records = tuple(sorted(records, key=lambda record: (sort_key(record.name), record.uuid)))
         with QtCore.QSignalBlocker(self.list):
             self.list.clear()
             for record in records:
-                item = QtWidgets.QListWidgetItem(record.name)
-                item.setData(QtCore.Qt.UserRole, record)
-                item.setToolTip('{}\nObjects: {} · UV sets: {}'.format(
-                    record.name, record.objects, ', '.join(record.uv_sets)))
-                self.list.addItem(item)
-            self.list.setCurrentRow(next((i for i, record in enumerate(records) if record.uuid == selected), -1))
+                self.list.addItem(record.name, record)
+                self.list.setItemData(self.list.count()-1,
+                    '{}\nObjects: {} · UV sets: {}'.format(record.name, record.objects, ', '.join(record.uv_sets)),
+                    QtCore.Qt.ToolTipRole)
+            self.list.setCurrentIndex(next((i for i, record in enumerate(records) if record.uuid == selected), -1))
         self.list.setEnabled(True)
         self.refresh_button.setEnabled(True)
         self.resize_list()
@@ -278,13 +282,7 @@ class MaterialController(QtCore.QObject):
         self.adjust_size()
         self.update_textures()
 
-    def current_record(self):
-        item = self.list.currentItem()
-        return item.data(QtCore.Qt.UserRole) if item is not None else None
-
     def resize_list(self):
-        row_height = max(22, self.list.sizeHintForRow(0))
-        self.list.setFixedHeight(min(9, max(3, self.list.count())) * row_height + 2)
         self.adjust_size()
 
     def adjust_size(self):
@@ -295,21 +293,21 @@ class MaterialController(QtCore.QObject):
 
     def queue_selection(self, index=None, *unused):
         # Only user activation selects UVs; scans and scene refreshes never do.
+        self.update_textures()
         self.selection_request += 1
         revision = self.selection_request
-        record = self.current_record()
+        record = self.list.currentData()
         records = (record,) if record is not None else ()
         def apply():
             if not self.stopped and revision == self.selection_request:
                 if self.scene_busy():
                     QtCore.QTimer.singleShot(50, apply)
                 else:
-                    self.update_textures()
                     self.select_uvs(records)
         QtCore.QTimer.singleShot(0, apply)
 
     def update_textures(self, *unused):
-        self.textures.set_material(self.current_record())
+        self.textures.set_material(self.list.currentData())
 
     def select_uvs(self, records):
         try:
