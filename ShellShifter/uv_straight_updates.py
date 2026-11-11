@@ -95,7 +95,8 @@ def choose_release(releases, current, maya):
         candidates.append((key, dict(version=version, maya=str(maya), name=name,
                                      url=url, size=size, digest=asset.get('digest'),
                                      manifest_url=manifest_url,
-                                     notes=str(release.get('body') or '')[:6000])))
+                                     notes=str(release.get('body') or '')[:6000],
+                                     notes_ru=str(release.get('notes_ru') or '')[:6000])))
     return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
 
@@ -143,7 +144,9 @@ def _fetch_stable_manifest(current, maya):
     tag = 'v' + version
     asset = dict(name=name, size=entry.get('size'), digest='sha256:' + digest.lower(),
                  browser_download_url=REPOSITORY_URL + '/releases/download/' + tag + '/' + name)
-    return choose_release([dict(tag_name=tag, assets=[asset])], current, maya)
+    release = dict(tag_name=tag, assets=[asset], body=manifest.get('notes'),
+                   notes_ru=manifest.get('notes_ru'))
+    return choose_release([release], current, maya)
 
 
 def fetch_release(current, maya):
@@ -333,6 +336,7 @@ class UpdateManager(QtCore.QObject):
         self.latest, self.dialog, self.staged = None, None, None
         self.busy = self.started = self.closed = self.pending_restart = False
         self.notified = set()
+        self.dialog_queued = False
         self.status = 'Automatic check at startup and every 4 hours.'
         self.timer = QtCore.QTimer(self)
         self.timer.setInterval(CHECK_INTERVAL_MS)
@@ -418,10 +422,6 @@ class UpdateManager(QtCore.QObject):
     def install(self):
         if self.busy or self.pending_restart or not self.latest:
             return
-        if _operations_running():
-            self.status = 'Finish the current UV operation and try again.'
-            self.changed.emit()
-            return
         if self.staged is not None:
             self._install_staged()
             self.changed.emit()
@@ -443,57 +443,121 @@ class UpdateManager(QtCore.QObject):
 
     def show_dialog(self):
         from shiboken6 import isValid
+        from uv_straight_language import language
+
+        if self.closed or not self.latest or self.pending_restart:
+            return
+        menu = sys.modules.get('uv_straight_menu')
+        if menu is not None and menu.menu_interaction_active():
+            if not self.dialog_queued:
+                self.dialog_queued = True
+
+                def show_when_ready():
+                    self.dialog_queued = False
+                    self.show_dialog()
+
+                menu.after_menu_interaction(show_when_ready)
+            return
         if self.dialog is not None and isValid(self.dialog):
-            self.dialog.close()
-        dialog = QtWidgets.QDialog(_maya_parent())
+            self.dialog.raise_()
+            self.dialog.activateWindow()
+            return
+        russian = language() == 'ru'
+
+        def label(en, ru):
+            return ru if russian else en
+
+        dialog = QtWidgets.QDialog(_maya_parent(), QtCore.Qt.Dialog | QtCore.Qt.FramelessWindowHint)
         self.dialog = dialog
         dialog.setObjectName('ShellShifterUpdateDialog')
-        dialog.setWindowTitle('ShellShifter Update')
-        dialog.setWindowFlags(dialog.windowFlags() | QtCore.Qt.Tool)
+        title = label('ShellShifter Update', 'Обновление ShellShifter')
+        dialog.setWindowTitle(title)
         dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose)
-        dialog.setMinimumWidth(390)
-        dialog.setStyleSheet('QDialog {background:#303030;} QLabel {color:#dedede;} '
-                            'QPushButton {background:#505050;color:#eeeeee;padding:8px;border-radius:8px;}')
+        dialog.setMinimumWidth(410)
+        dialog.setStyleSheet(
+            'QDialog#ShellShifterUpdateDialog {background:#303030;border:1px solid #555;}'
+            'QLabel {color:#dedede;background:transparent;}'
+            'QLabel#updateTitle {font-size:14px;font-weight:600;}'
+            'QLabel#updateVersion {color:#bcbcbc;}'
+            'QTextBrowser {background:#262626;color:#dedede;border:1px solid #444;border-radius:6px;padding:6px;}'
+            'QPushButton,QToolButton {background:#505050;color:#eee;border:0;border-radius:7px;padding:7px;}'
+            'QPushButton:hover,QToolButton:hover {background:#626262;}'
+            'QPushButton:pressed,QToolButton:pressed {background:#404040;}'
+            'QPushButton#updateInstall {background:#cddfdb;color:#202929;}'
+            'QPushButton#updateInstall:hover {background:#dcece8;}'
+            'QPushButton#updateInstall:pressed {background:#aec7c1;}'
+            'QPushButton#updateInstall:disabled {background:#424242;color:#999;}')
         layout = QtWidgets.QVBoxLayout(dialog)
-        label = QtWidgets.QLabel('ShellShifter {} → {}\nMaya {}'.format(
+        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setSpacing(8)
+        header = QtWidgets.QHBoxLayout()
+        heading = QtWidgets.QLabel(title)
+        heading.setObjectName('updateTitle')
+        header.addWidget(heading, 1)
+        close = QtWidgets.QToolButton()
+        close.setText('×')
+        close.setAccessibleName(label('Close', 'Закрыть'))
+        close.clicked.connect(dialog.reject)
+        header.addWidget(close)
+        layout.addLayout(header)
+        version = QtWidgets.QLabel('{} → {}  ·  Maya {}'.format(
             self.current, self.latest['version'], self.maya))
-        label.setTextFormat(QtCore.Qt.PlainText)
-        layout.addWidget(label)
-        notes = QtWidgets.QPlainTextEdit()
-        notes.setReadOnly(True)
-        notes.setPlainText(self.latest['notes'])
-        notes.setMaximumHeight(170)
+        version.setObjectName('updateVersion')
+        version.setTextFormat(QtCore.Qt.PlainText)
+        layout.addWidget(version)
+        layout.addWidget(QtWidgets.QLabel(label('What’s new', 'Что изменилось')))
+        notes = QtWidgets.QTextBrowser()
+        notes.setOpenLinks(False)
+        notes.setOpenExternalLinks(False)
+        notes.setMinimumHeight(125)
+        notes.setMaximumHeight(200)
+        release_notes = self.latest.get('notes') or ''
+        english, _, translated = release_notes.partition('## Русский')
+        release_notes = (self.latest.get('notes_ru') or translated or english) if russian else english
+        if release_notes.strip():
+            notes.document().setMarkdown(release_notes, QtGui.QTextDocument.MarkdownDialectGitHub |
+                              QtGui.QTextDocument.MarkdownNoHTML)
+        else:
+            notes.setPlainText(label('Release notes are available on GitHub.', 'Описание изменений доступно на GitHub.'))
         layout.addWidget(notes)
-        layout.addWidget(QtWidgets.QLabel('Restart Maya after installation. Your scene stays open.'))
-        status = QtWidgets.QLabel(self.status)
+        status = QtWidgets.QLabel()
         status.setTextFormat(QtCore.Qt.PlainText)
         status.setWordWrap(True)
         layout.addWidget(status)
         row = QtWidgets.QHBoxLayout()
-        install = QtWidgets.QPushButton('Download & Install')
+        install = QtWidgets.QPushButton()
+        install.setObjectName('updateInstall')
         install.clicked.connect(self.install)
-        later = QtWidgets.QPushButton('Later')
-        later.clicked.connect(dialog.close)
+        later = QtWidgets.QPushButton()
+        later.setObjectName('updateLater')
+        later.clicked.connect(dialog.reject)
         row.addWidget(install)
         row.addWidget(later)
         layout.addLayout(row)
+
         def sync():
             if not isValid(dialog):
                 return
             status.setText(self.status)
-            install.setEnabled(not self.busy and not self.pending_restart)
-            if self.staged is not None:
-                install.setText('Install')
+            install.setEnabled(bool(self.latest) and not self.busy and not self.pending_restart)
             if self.pending_restart:
-                later.setText('Close')
+                install.setText(label('Installed', 'Установлено'))
+            elif self.busy:
+                install.setText(label('Please wait…', 'Подождите…'))
+            elif self.staged is not None:
+                install.setText(label('Install', 'Установить'))
+            else:
+                install.setText(label('Download and Install', 'Скачать и установить'))
+            later.setText(label('Close', 'Закрыть') if self.pending_restart else label('Later', 'Позже'))
+
+        def finished(*unused):
+            self.changed.disconnect(sync)
+            if self.dialog is dialog:
+                self.dialog = None
+
         self.changed.connect(sync)
-        def disconnected(*unused):
-            try:
-                self.changed.disconnect(sync)
-            except (RuntimeError, TypeError):
-                pass
-        dialog.destroyed.connect(disconnected)
-        localize(dialog)
+        dialog.finished.connect(finished)
+        sync()
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()

@@ -31,7 +31,7 @@ def creator():
 
 
 def initializePlugin(obj):
-    mpx.MFnPlugin(obj,'ShellShifter','1.4.240','Any').registerContextCommand('shellShifterPickUVTileContext',creator)
+    mpx.MFnPlugin(obj,'ShellShifter','1.4.241','Any').registerContextCommand('shellShifterPickUVTileContext',creator)
 
 
 def uninitializePlugin(obj):mpx.MFnPlugin(obj).deregisterContextCommand('shellShifterPickUVTileContext')
