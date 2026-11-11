@@ -1965,7 +1965,7 @@ def _build_window(popup):
     button('Clear Color',window.texel_display.clear,texel_buttons).setToolTip(
         'Clear texel-density colors from the viewport.')
     def sync_texel(*unused):
-        with QtCore.QSignalBlocker(texel_toggle):
+        with signals_blocked(texel_toggle):
             texel_toggle.setChecked(window.texel_display.model.active)
 
     def sync_checker(*unused):
@@ -1976,7 +1976,7 @@ def _build_window(popup):
                           for shape in checker._meshes())
         except (RuntimeError, ValueError):
             checked = False
-        with QtCore.QSignalBlocker(checker_toggle):
+        with signals_blocked(checker_toggle):
             checker_toggle.setChecked(checked)
 
     def toggle_texel(checked):
