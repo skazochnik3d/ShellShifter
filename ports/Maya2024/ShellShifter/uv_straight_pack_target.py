@@ -1,5 +1,4 @@
 """Choose an integer UV tile in a native UV Editor, with a hover outline."""
-from pathlib import Path
 import math
 from PySide2 import QtCore,QtGui,QtWidgets
 from shiboken2 import isValid,wrapInstance
@@ -69,7 +68,8 @@ class TilePicker(QtCore.QObject):
         if len(ports)!=1:raise ValueError('Could not find the UV Editor coordinate view.')
         self.viewport=ports[0]
         plugin='uv_straight_pack_target_plugin'
-        if not cmds.pluginInfo(plugin,query=True,loaded=True):cmds.loadPlugin(str(Path(__file__).with_name(plugin+'.py')),quiet=True)
+        from uv_straight_plugin_loader import load_plugin
+        load_plugin(plugin)
         self.context_name=cmds.shellShifterPickUVTileContext()
         self.context=native_context
         self.overlay=TileOverlay(self.viewport)

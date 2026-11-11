@@ -1,6 +1,5 @@
 """Merge usable UV shells into a named destination and preserve tagged sets."""
 from dataclasses import dataclass, field
-from pathlib import Path
 import hashlib
 import json
 import uuid
@@ -330,9 +329,9 @@ def promote(results, filters='', limit=DEFAULT_LIMIT, keep=None):
         if current_signature != result.signature:
             raise ValueError('UVs, geometry, or sets changed. Analyse again.')
     plugin = 'uv_straight_uv_merge_command_plugin'
-    if not cmds.pluginInfo(plugin, query=True, loaded=True):
-        cmds.loadPlugin(str(Path(__file__).with_name(plugin+'.py')), quiet=True)
-        cmds.pluginInfo(plugin, edit=True, writeRequires=False)
+    from uv_straight_plugin_loader import load_plugin
+    load_plugin(plugin)
+    cmds.pluginInfo(plugin, edit=True, writeRequires=False)
     key = uuid.uuid4().hex
     _pending[key] = pending
     try:

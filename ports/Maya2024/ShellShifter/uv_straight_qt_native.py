@@ -839,9 +839,8 @@ class QtAnnotations(QtCore.QObject):
                     parent = cmds.listRelatives(shape, parent=True, fullPath=True) or []
                     cmds.delete(parent or shape)
             cmds.unloadPlugin(name)
-            loaded = False
-        if not loaded:
-            cmds.loadPlugin(str(Path(__file__).with_name(name + '.py')), quiet=True)
+        from uv_straight_plugin_loader import load_plugin
+        load_plugin(name)
         # The draw node is runtime-only and setDoNotWrite. Keep its provider
         # out of the scene's `requires` list as well.
         try:
@@ -1302,8 +1301,8 @@ class QtAnnotations(QtCore.QObject):
             self.context_name, self.context = stored_context
         elif (self.context_name is None or self.editor_contexts or
               self.context_name in self.retired_contexts):
-            if not cmds.pluginInfo('uv_straight_bounds_plugin', query=True, loaded=True):
-                cmds.loadPlugin(str(Path(__file__).with_name('uv_straight_bounds_plugin.py')), quiet=True)
+            from uv_straight_plugin_loader import load_plugin
+            load_plugin('uv_straight_bounds_plugin')
             self.context_name = cmds.uvStraightBoundsContext()
             self.context = bounds_state.CONTEXT
         self.editor_contexts[editor] = (self.context_name, self.context)

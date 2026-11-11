@@ -1,5 +1,4 @@
 """One undoable UV-array commit per packing result, on the Maya thread."""
-from pathlib import Path
 import sys
 import uuid
 import maya.cmds as cmds
@@ -156,9 +155,9 @@ def commit(entries, callback=None):
     if not cmds.undoInfo(query=True,state=True):
         raise ValueError('Enable Undo in Maya preferences before using ShellShifter.')
     plugin='uv_straight_pack_commit_plugin'
-    if not cmds.pluginInfo(plugin,query=True,loaded=True):
-        cmds.loadPlugin(str(Path(__file__).with_name(plugin+'.py')),quiet=True)
-        cmds.pluginInfo(plugin,edit=True,writeRequires=False)
+    from uv_straight_plugin_loader import load_plugin
+    load_plugin(plugin)
+    cmds.pluginInfo(plugin, edit=True, writeRequires=False)
     key=uuid.uuid4().hex
     _pending[key]=(entries,callback)
     try:cmds.shellShifterApplyPackedUVs(key)

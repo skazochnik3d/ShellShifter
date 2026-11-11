@@ -19,7 +19,7 @@ RUNTIME_NAME = re.compile(
 
 
 def _is_ours(annotation):
-    annotations = (ANNOTATION, ENGLISH_ANNOTATION, LEGACY_ANNOTATION)
+    annotations = (ANNOTATION, ENGLISH_ANNOTATION, LEGACY_ANNOTATION, 'ShellShifter для Maya')
     return annotation in annotations or annotation.startswith(tuple(value+' ' for value in annotations))
 
 
@@ -31,11 +31,13 @@ def rename_existing_buttons():
     runtime = sys.modules.get('shellshifter')
     image = (str(Path(runtime.__file__).resolve().parent / 'assets' / 'shellshifter_shelf.png')
              if runtime else SHELF_ICON)
+    command = _shelf_command(Path(image).parent.parent)
     count = 0
     for item in cmds.lsUI(type='shelfButton', long=True) or []:
         if _is_ours(cmds.shelfButton(item, query=True, annotation=True)):
             cmds.shelfButton(item, edit=True, label='ShellShifter',
-                            annotation=ANNOTATION, imageOverlayLabel='', image1=image, style='iconOnly')
+                            annotation=ANNOTATION, imageOverlayLabel='', image1=image,
+                            style='iconOnly', command=command, sourceType='python')
             count += 1
     return count
 
@@ -104,6 +106,32 @@ def _install(source, scripts, year):
     return target, True
 
 
+def _shelf_command(folder):
+    return "import runpy\nrunpy.run_path({!r})['launch']()".format(str(folder / 'install_shellshifter.py'))
+
+
+def launch():
+    import maya.cmds as cmds
+
+    folder = Path(__file__).resolve().parent
+    for name, module in tuple(sys.modules.items()):
+        if name != 'shellshifter' and name != 'uv_straight' and not name.startswith('uv_straight_'):
+            continue
+        if name.endswith('_plugin'):
+            continue
+        location = getattr(module, '__file__', None)
+        if location and Path(location).resolve().parent != folder:
+            cmds.warning('ShellShifter is already loaded from {}. Restart Maya and open the Shelf button for {}.'
+                         .format(Path(location).resolve().parent, folder))
+            return
+    path = str(folder)
+    if path in sys.path:
+        sys.path.remove(path)
+    sys.path.insert(0, path)
+    import shellshifter
+    return shellshifter.show()
+
+
 def onMayaDroppedPythonFile(*args):
     import maya.cmds as cmds
     import maya.mel as mel
@@ -114,23 +142,19 @@ def onMayaDroppedPythonFile(*args):
     source = Path(__file__).resolve().parent
     scripts = Path(cmds.internalVar(userScriptDir=True)).resolve()
     folder, copied = _install(source, scripts, str(cmds.about(version=True))[:4])
-    command = ('import sys\n'
-               'p = {!r}\n'
-               'if p in sys.path: sys.path.remove(p)\n'
-               'sys.path.insert(0, p)\n'
-               'import shellshifter\nshellshifter.show()').format(str(folder))
-    existing = cmds.shelfLayout(shelf, query=True, childArray=True) or []
-    button = next((item for item in existing if cmds.objectTypeUI(item) == 'shelfButton'
-                   and _is_ours(cmds.shelfButton(item, query=True, annotation=True))), None)
+    command = _shelf_command(folder)
+    buttons = [item for item in cmds.lsUI(type='shelfButton', long=True) or []
+               if _is_ours(cmds.shelfButton(item, query=True, annotation=True))]
     options = dict(label='ShellShifter', imageOverlayLabel='', annotation=ANNOTATION,
                    image1=str(folder / 'assets' / 'shellshifter_shelf.png'), style='iconOnly',
                    command=command, sourceType='python')
-    if button:
-        cmds.shelfButton(button, edit=True, **options)
+    if buttons:
+        for button in buttons:
+            cmds.shelfButton(button, edit=True, **options)
     else:
         cmds.shelfButton(parent=shelf, **options)
     mel.eval('saveAllShelves $gShelfTopLevel')
-    if copied and 'uv_straight' in sys.modules:
+    if copied and ('uv_straight' in sys.modules or 'shellshifter' in sys.modules):
         cmds.warning('ShellShifter files copied. Restart Maya to load the new installation.')
         return
     exec(command, {})

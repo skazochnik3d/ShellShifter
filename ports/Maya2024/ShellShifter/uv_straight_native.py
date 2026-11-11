@@ -1,5 +1,4 @@
 """Native UV editor annotation manager. Explicit enable/disable; restores editors."""
-from pathlib import Path
 from contextlib import contextmanager
 import maya.cmds as cmds
 import maya.api.OpenMaya as om
@@ -209,15 +208,13 @@ class NativeAnnotations(QtCore.QObject):
         self.callbacks = []
 
     def start(self):
-        path = str(Path(__file__).with_name('uv_straight_draw_plugin.py'))
         loaded = cmds.pluginInfo('uv_straight_draw_plugin', query=True, loaded=True)
         if loaded and cmds.pluginInfo('uv_straight_draw_plugin', query=True, version=True) != '1.4.37':
             if cmds.ls(type='uvStraightAnnotationShape'):
                 raise RuntimeError('Disable the old UV annotation helper before upgrading.')
             cmds.unloadPlugin('uv_straight_draw_plugin')
-            loaded = False
-        if not loaded:
-            cmds.loadPlugin(path, quiet=True)
+        from uv_straight_plugin_loader import load_plugin
+        load_plugin('uv_straight_draw_plugin')
         self.plugin = draw_state
         self.plugin.DRAW_COUNT = 0
         self.plugin.CAN_DRAW_COUNT = 0
