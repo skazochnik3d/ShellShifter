@@ -9,6 +9,69 @@ from uv_straight_materials import scan, select
 from uv_straight_material_groups import sort_key
 from uv_straight_icons import icon
 
+_VIEW_OPTION = 'shellShifterMaterialsView'
+
+
+def _material_sphere(material):
+    color = QtGui.QColor('#8b9299')
+    for attribute in ('baseColor', 'color', 'outColor'):
+        plug = material + '.' + attribute
+        if not cmds.objExists(plug):
+            continue
+        try:
+            channels = cmds.getAttr(plug)[0]
+            color = QtGui.QColor.fromRgbF(*(max(0., min(1., value)) for value in channels[:3]))
+            break
+        except (RuntimeError, TypeError, ValueError, IndexError):
+            continue
+    pixmap = QtGui.QPixmap(48, 48)
+    pixmap.fill(QtCore.Qt.transparent)
+    painter = QtGui.QPainter(pixmap)
+    painter.setRenderHint(QtGui.QPainter.Antialiasing)
+    gradient = QtGui.QRadialGradient(24, 24, 24, 16, 13)
+    gradient.setColorAt(0., color.lighter(175))
+    gradient.setColorAt(.55, color)
+    gradient.setColorAt(.92, color.darker(240))
+    gradient.setColorAt(1., QtGui.QColor('#25282a'))
+    painter.setPen(QtCore.Qt.NoPen)
+    painter.setBrush(gradient)
+    painter.drawEllipse(2, 2, 44, 44)
+    painter.end()
+    return QtGui.QIcon(pixmap)
+
+
+class MaterialSphereGrid(QtWidgets.QListWidget):
+    CELL_HEIGHT = 78
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName('materialSphereGrid')
+        self.setAccessibleName('Material spheres')
+        self.setViewMode(QtWidgets.QListView.IconMode)
+        self.setMovement(QtWidgets.QListView.Static)
+        self.setFlow(QtWidgets.QListView.LeftToRight)
+        self.setWrapping(True)
+        self.setResizeMode(QtWidgets.QListView.Adjust)
+        self.setIconSize(QtCore.QSize(48, 48))
+        self.setUniformItemSizes(True)
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.setStyleSheet(
+            'QListWidget {background:#292929;color:#eee;border:1px solid #515151;border-radius:6px;}'
+            'QListWidget::item {padding:4px 2px;border-radius:5px;}'
+            'QListWidget::item:hover {background:#474747;}'
+            'QListWidget::item:selected {background:#cfe1dc;color:#17292b;}')
+
+    def resizeEvent(self, event):
+        self.setGridSize(QtCore.QSize(max(1, self.viewport().width() // 3), self.CELL_HEIGHT))
+        super().resizeEvent(event)
+
+    def fit_rows(self):
+        rows = (self.count() + 2) // 3
+        self.setVerticalScrollBarPolicy(
+            QtCore.Qt.ScrollBarAlwaysOn if rows > 3 else QtCore.Qt.ScrollBarAlwaysOff)
+        self.setFixedHeight(max(1, min(3, rows)) * self.CELL_HEIGHT + 2)
+
+
 class MaterialController(QtCore.QObject):
     def __init__(self, window, layout):
         super().__init__(window)
@@ -55,7 +118,7 @@ class MaterialController(QtCore.QObject):
         outer.setSpacing(5)
         outer.addWidget(card)
         layout.setContentsMargins(8, 3, 8, 8)
-        header_row.setContentsMargins(56, 0, 8, 0)
+        header_row.setContentsMargins(8, 0, 8, 0)
         header_row.setSpacing(0)
         section.header.setFixedHeight(24)
         section.header.setStyleSheet('QToolButton#categoryHeader { text-align: center; padding: 0; color: #f0f0f0; }')
@@ -75,6 +138,22 @@ class MaterialController(QtCore.QObject):
         header_row.insertWidget(header_row.indexOf(section.pin), self.refresh_button)
         self.refresh_button.setStyleSheet('QToolButton { padding: 0; border-radius: 5px; } '
                                          'QToolButton:hover { background: #525252; }')
+        self.sphere_mode = (cmds.optionVar(query=_VIEW_OPTION) == 'spheres'
+                            if cmds.optionVar(exists=_VIEW_OPTION) else False)
+        self.mode_buttons = QtWidgets.QButtonGroup(self)
+        self.mode_buttons.setExclusive(True)
+        for label, sphere_mode in (('List', False), ('Spheres', True)):
+            control = QtWidgets.QToolButton()
+            control.setText(label)
+            control.setCheckable(True)
+            control.setChecked(sphere_mode == self.sphere_mode)
+            control.setToolTip('Show material spheres' if sphere_mode else 'Show the material dropdown')
+            control.setStyleSheet(
+                'QToolButton {padding:3px 5px;border-radius:4px;color:#eee;background:#444;}'
+                'QToolButton:checked {color:#17292b;background:#cfe1dc;}')
+            control.clicked.connect(lambda checked=False, spheres=sphere_mode: self.set_material_view(spheres))
+            self.mode_buttons.addButton(control, int(sphere_mode))
+            header_row.insertWidget(header_row.indexOf(self.refresh_button), control)
         self.list = QtWidgets.QComboBox()
         self.list.setObjectName('materialPicker')
         self.list.setMinimumWidth(0)
@@ -94,6 +173,15 @@ class MaterialController(QtCore.QObject):
         self.drop_viewport = self.list
         self.list.activated.connect(self.queue_selection)
         body.addWidget(self.list)
+        self.spheres = MaterialSphereGrid()
+        self.spheres.itemClicked.connect(self.select_sphere)
+        self.spheres.itemActivated.connect(self.select_sphere)
+        self.spheres.hide()
+        self.list.setVisible(not self.sphere_mode)
+        body.addWidget(self.spheres)
+        sphere_viewport = self.spheres.viewport()
+        sphere_viewport.setAcceptDrops(True)
+        sphere_viewport.installEventFilter(self)
         self.empty = QtWidgets.QLabel('No materials with UVs found.')
         self.empty.setWordWrap(True)
         self.empty.setAlignment(QtCore.Qt.AlignCenter)
@@ -127,7 +215,7 @@ class MaterialController(QtCore.QObject):
         self.drop_viewport.installEventFilter(self)
 
     def eventFilter(self, watched, event):
-        if watched is self.view or watched is self.drop_viewport:
+        if watched in (self.view, self.drop_viewport, self.spheres.viewport()):
             if event.type() in (QtCore.QEvent.DragEnter,QtCore.QEvent.DragMove,QtCore.QEvent.Drop):
                 from uv_straight_texture_import_ui import mime_paths
                 paths=mime_paths(event.mimeData())
@@ -274,7 +362,7 @@ class MaterialController(QtCore.QObject):
                 self.rename_callbacks.append(om.MNodeMessage.addNameChangedCallback(nodes.getDependNode(0), self.invalidate))
             except RuntimeError:
                 pass
-        self.list.setVisible(bool(records))
+        self.refresh_material_view()
         self.empty.setVisible(not records)
         self.status.setText('{} material{}'.format(len(records), '' if len(records) == 1 else 's'))
         self.status.hide()
@@ -284,6 +372,38 @@ class MaterialController(QtCore.QObject):
             self.adjust_size()
             self.update_textures()
 
+    def set_material_view(self, spheres):
+        if self.sphere_mode == spheres:
+            return
+        self.sphere_mode = spheres
+        cmds.optionVar(stringValue=(_VIEW_OPTION, 'spheres' if spheres else 'list'))
+        self.refresh_material_view()
+        self.adjust_size()
+
+    def refresh_material_view(self):
+        self.list.setVisible(bool(self.records) and not self.sphere_mode)
+        self.spheres.setVisible(bool(self.records) and self.sphere_mode)
+        if not self.sphere_mode:
+            return
+        if tuple(self.spheres.item(index).data(QtCore.Qt.UserRole) for index in range(self.spheres.count())) != tuple(
+                (record.uuid, record.name) for record in self.records):
+            self.spheres.clear()
+            for record in self.records:
+                item = QtWidgets.QListWidgetItem(_material_sphere(record.name), record.name)
+                item.setData(QtCore.Qt.UserRole, (record.uuid, record.name))
+                item.setToolTip(record.name)
+                self.spheres.addItem(item)
+            self.spheres.fit_rows()
+        self.sync_sphere_selection()
+
+    def sync_sphere_selection(self):
+        if self.sphere_mode:
+            self.spheres.setCurrentRow(self.list.currentIndex())
+
+    def select_sphere(self, item):
+        self.list.setCurrentIndex(self.spheres.row(item))
+        self.queue_selection()
+
     def adjust_size(self):
         if hasattr(self.window, 'adjust_popup_size'):
             # Coalesce requests after Qt propagates size hints through the
@@ -292,6 +412,7 @@ class MaterialController(QtCore.QObject):
 
     def queue_selection(self, index=None, *unused):
         # Only user activation selects UVs; scans and scene refreshes never do.
+        self.sync_sphere_selection()
         self.update_textures()
         self.selection_request += 1
         revision = self.selection_request
