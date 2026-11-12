@@ -75,7 +75,8 @@ class TransferWorker(QtCore.QThread):
     def run(self):
         from uv_straight_transfer import plan
         try:self.outcome.emit(plan(self.prepared,self.progress.emit,self.cancel),None)
-        except Exception as error:self.outcome.emit(None,error)
+        except Exception as error:self.outcome.emit(None,error.with_traceback(None))
+        finally:self.prepared=None
 
 
 class TransferProgress(QtWidgets.QDialog):
@@ -129,6 +130,7 @@ class TransferProgress(QtWidgets.QDialog):
             self.phase.setText('Connecting new textures…');self.stop.setEnabled(False)
             self.result=apply(self.prepared,result)
         except Exception as failure:self.failed(failure);return
+        finally:self.prepared=None
         warnings=self.result.get('warnings',[])
         if warnings or self.result.get('report_warning'):
             self.timer.stop();self.setWindowTitle('Transfer Warnings')
@@ -145,7 +147,7 @@ class TransferProgress(QtWidgets.QDialog):
             return
         self.finish()
     def failed(self,error):
-        self.error=error;self.timer.stop()
+        self.error=error.with_traceback(None);self.prepared=None;self.timer.stop()
         if self.cancel.is_set():self.finish();return
         self.setWindowTitle('Texture transfer error')
         self.phase.setText('Transfer failed.\n'+str(error))
@@ -177,6 +179,7 @@ def run(prepare):
         return dialog.result
     finally:
         if dialog.worker is not None and dialog.worker.isRunning():dialog.cancel.set();dialog.worker.wait()
+        dialog.prepare=dialog.prepared=None
         _active=None;dialog.deleteLater()
 
 

@@ -110,6 +110,16 @@ def backend():
     return result
 
 
+def release_buffers():
+    backend = getattr(_state, 'backend', None)
+    if backend is None:
+        return
+    backend.api.clFinish(backend.queue)
+    for handle, _ in backend.buffers.values():
+        backend.api.clReleaseMemObject(handle)
+    backend.buffers.clear()
+
+
 def close():
     result=getattr(_state,'backend',None)
     if result is not None:result.close();_state.backend=None

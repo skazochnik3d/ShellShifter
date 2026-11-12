@@ -1,4 +1,4 @@
-"""One bounded, process-local packing session; pure data and idle GPU handles."""
+"""One bounded, process-local packing session; bounded layout seeds and a per-run GPU backend."""
 import atexit
 from copy import deepcopy
 import hashlib
@@ -36,9 +36,6 @@ class Session:
     def __init__(self,data,key):
         self.key=key
         self.geometry_target_size=tuple(data.get('target_size',(1.,1.)))
-        self.geometry={name:([np.asarray(shell,dtype=float).tolist() for shell in data[name]]
-                             if name=='triangles' else np.asarray(data.get(name,[]),dtype=float).tolist())
-                       if key is not None else data.get(name,[]) for name in _GEOMETRY}
         self.backend=None
         self.best=None
         self.pool=[]
@@ -57,7 +54,7 @@ class Session:
         global _idle
         if self.key is None or best is None:
             self.close();return
-        if self.backend is not None:self.backend.finish_run()
+        self.release_backend()
         from uv_straight_pack_search import _diverse_seeds
         self.best=deepcopy(best);self.rounds+=rounds
         candidates=list(pool or [])
@@ -70,19 +67,24 @@ class Session:
             previous=_idle;_idle=self
         if previous is not None and previous is not self:previous.close()
 
+    def release_backend(self):
+        backend, self.backend = self.backend, None
+        if backend is not None:
+            backend.close()
+
     def close(self):
-        if self.backend is not None:
-            self.backend.close();self.backend=None
+        self.release_backend()
         self.best=None;self.pool=[];self.failed_orders=[]
 
 
 def acquire(data):
     """Detach idle state: concurrent searches can never share a GPU queue."""
     global _idle
-    key=signature(data) if data.get('reuse_cache',True) and data.get('method')=='contours' else None
+    shell_count = len(data.get('boxes', ()))
+    key = (signature(data) if shell_count <= 2048 and data.get('reuse_cache', True)
+           and data.get('method') == 'contours' else None)
     with _lock:
-        previous=_idle if key is not None else None
-        if key is not None:_idle=None
+        previous, _idle = _idle, None
     if previous is not None and previous.key==key:
         previous.hit=True
         return previous
@@ -100,6 +102,8 @@ def close():
 def remember_committed(data,result):
     """Promote an independently certified, committed refinement for resume."""
     from uv_straight_pack_search import _diverse_seeds
+    with _lock:
+        if _idle is None:return
     key=signature(data)
     with _lock:
         session=_idle

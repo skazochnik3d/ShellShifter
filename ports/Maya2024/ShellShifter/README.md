@@ -1,4 +1,4 @@
-# ShellShifter 1.4.255 for Maya 2024
+# ShellShifter 1.4.256 for Maya 2024
 
 Windows x64 build for Maya 2024 (PySide2). The archive includes NumPy for offline installation.
 

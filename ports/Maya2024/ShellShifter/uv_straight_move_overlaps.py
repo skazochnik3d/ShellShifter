@@ -1180,7 +1180,7 @@ def _move_shell_labels(fn,handle,uv_set):
     # Bounded per-session storage; handles never keep deleted scene nodes alive.
     size=lambda item:len(item[2])+sum(len(data)//4 for data in item[1][1:])
     total=sum(size(item) for item in _move_shell_cache.values())
-    while len(_move_shell_cache)>1 and (len(_move_shell_cache)>16 or total>1000000):
+    while _move_shell_cache and (len(_move_shell_cache)>16 or total>1000000):
         _,removed=_move_shell_cache.popitem(last=False);total-=size(removed)
     return entry[2]
 

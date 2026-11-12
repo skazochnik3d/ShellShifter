@@ -30,7 +30,9 @@ class PackWorker(QtCore.QThread):
             result = plan(self.data, self.progress.emit, self.cancel,self.finish_cancel)
             self.outcome.emit(result, None)
         except Exception as error:
-            self.outcome.emit(None, error)
+            self.outcome.emit(None, error.with_traceback(None))
+        finally:
+            self.data = None
 
 
 class PackingProgress(QtWidgets.QDialog):
@@ -196,6 +198,7 @@ class PackingProgress(QtWidgets.QDialog):
                         self.free.setToolTip('Preliminary estimate by UV groups. Fixed overlaps count once; overlaps within moving groups may affect the result.')
                     self.update_statistics(result)
                     applied=self.commit(self.prepared,result,self.apply_progress,self.source_progress)
+                    self.prepared = None
                     if isinstance(applied,dict):self.result=applied
                     self.free.setText('Free space: ≈ {:.1f}%'.format(self.result['free_percent']))
                 self.result['elapsed'] = time.monotonic()-self.started
@@ -293,5 +296,7 @@ def run(prepare, commit, parent=None, refresh_transfer=None):
     finally:
         if dialog.worker is not None and dialog.worker.isRunning():
             dialog.cancel.set(); dialog.worker.wait()
+        dialog.prepared = None
+        dialog.prepare = dialog.commit = dialog.refresh_transfer = None
         _active = None
         dialog.deleteLater()

@@ -47,7 +47,7 @@ class PinMeshCache:
         else:self.hits+=1
         self.entries.move_to_end(name)
         total=sum(len(e[2].faces) for e in self.entries.values())
-        while len(self.entries)>1 and (len(self.entries)>self.limit or total>self.face_limit):
+        while self.entries and (len(self.entries)>self.limit or total>self.face_limit):
             _,removed=self.entries.popitem(last=False);total-=len(removed[2].faces)
         mesh=copy(entry[2]);mesh.fn=fn;mesh.path=om.MDagPath(path)
         mesh.points=dict(enumerate(zip(u,v)));mesh._pin_coordinates=np.column_stack((u,v))

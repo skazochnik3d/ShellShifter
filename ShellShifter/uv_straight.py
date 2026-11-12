@@ -13,7 +13,7 @@ import maya.api.OpenMaya as om
 
 WINDOW = 'uvStraightQtWindowWorkspaceControl'
 PRODUCT_NAME = 'ShellShifter'
-VERSION = '1.4.255'
+VERSION = '1.4.256'
 MARK_ATTR = 'uvStraightConstraints'
 _preview = None
 _window = None
@@ -2051,7 +2051,13 @@ def _maya_relax_bridge(mesh, shell, pin_positions, iterations=10,pin_unselected=
 def _solve_tasks(tasks, iterations, anchor_weight, relax_bridge=False, snapshots=None, axis=None):
     """Solve prepared shells without opening an undo chunk or changing selection."""
     from uv_straight_solver import solve_tasks
-    solve_tasks(tasks, iterations, anchor_weight, relax_bridge,snapshots,axis)
+    try:
+        solve_tasks(tasks, iterations, anchor_weight, relax_bridge,snapshots,axis)
+    finally:
+        import sys
+        gpu = sys.modules.get('uv_straight_solver_gpu')
+        if gpu is not None:
+            gpu.release_buffers()
 
 
 def _solve_selected_shells(iterations, anchor_weight, label, relax_bridge=False, axis=None):

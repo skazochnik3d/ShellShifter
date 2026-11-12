@@ -587,7 +587,7 @@ def plan(data, callback=None, cancel=None, finish_cancel=None):
     from uv_straight_pack_search import SearchMonitor, SearchStopped
     started=time.monotonic()
     session=acquire(data)
-    data=dict(data);data.update(session.geometry)
+    data=dict(data)
     monitor = SearchMonitor(data['areas'],data['static_area'],callback,cancel,data['seconds'],data.get('target_size',(1.,1.)),data.get('iteration_limit',0))
     monitor.search_upgrade=bool(data.get('search_upgrade',True))
     monitor.tabi_seed=bool(data.get('tabi_seed',True))
