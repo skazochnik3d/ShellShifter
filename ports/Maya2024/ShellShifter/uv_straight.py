@@ -13,7 +13,7 @@ import maya.api.OpenMaya as om
 
 WINDOW = 'uvStraightQtWindowWorkspaceControl'
 PRODUCT_NAME = 'ShellShifter'
-VERSION = '1.4.256'
+VERSION = '1.4.257'
 MARK_ATTR = 'uvStraightConstraints'
 _preview = None
 _window = None
@@ -1228,8 +1228,11 @@ def unwrap_from_edges(max_deviation=15.0, straighten_quads=False,
             for path, cuts in plans:
                 mesh = Mesh(path, build_edges=False)
                 _save_marks(mesh, [])
-                if mesh.points:
-                    cmds.polyPinUV(mesh.components(mesh.points), operation=1,
+                # Maya records native undo data for every UV passed to polyPinUV.
+                # Avoid creating undo records for UVs that are already unpinned.
+                pinned = mesh.pins(mesh.points) if mesh.points else set()
+                if pinned:
+                    cmds.polyPinUV(mesh.components(pinned), operation=1,
                                    uvSetName=mesh.uv_set)
                 _camera_project(mesh)
                 if cuts:
