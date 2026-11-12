@@ -13,7 +13,7 @@ import maya.api.OpenMaya as om
 
 WINDOW = 'uvStraightQtWindowWorkspaceControl'
 PRODUCT_NAME = 'ShellShifter'
-VERSION = '1.4.253'
+VERSION = '1.4.254'
 MARK_ATTR = 'uvStraightConstraints'
 _preview = None
 _window = None
@@ -777,7 +777,7 @@ def _selected_edge_ids(selection, mesh):
     return result
 
 
-def _selected_meshes():
+def _selected_mesh_paths():
     selection = cmds.ls(selection=True, long=True, flatten=True) or []
     meshes = {}
     for item in selection:
@@ -790,7 +790,7 @@ def _selected_meshes():
             meshes[path.fullPathName()] = path
     if not meshes:
         raise ValueError('Select a polygon mesh or its edges.')
-    return selection, [Mesh(path) for path in meshes.values()]
+    return selection, list(meshes.values())
 
 
 def _camera_project(mesh):
@@ -1088,7 +1088,7 @@ def _pack_unwrapped(meshes, resolution, spacing_px):
     # Automatic layout is a bounded final step, without the interactive
     # packing dialog. The separate Pack UVs action keeps its search window.
     from uv_straight_pack import pack
-    return pack(meshes, resolution, spacing_px, method='fast', seconds=30.)
+    return pack(meshes, resolution, spacing_px, method='fast', seconds=30., reuse_preparation=False)
 
 
 def pack_selected_uvs(resolution=2048, spacing_px=16, margin_px=16,
@@ -1198,9 +1198,10 @@ def unwrap_from_edges(max_deviation=15.0, straighten_quads=False,
     resolution = int(resolution)
     if not math.isfinite(spacing_px) or not 0 <= spacing_px < resolution / 4:
         raise ValueError('Shell spacing must be between 0 and one quarter of the texture size.')
-    selection, meshes = _selected_meshes()
+    selection, paths = _selected_mesh_paths()
     plans = []
-    for mesh in meshes:
+    for path in paths:
+        mesh = Mesh(path)
         chosen = _selected_edge_ids(selection, mesh)
         if any(count > 2 for count in mesh.edge_faces.values()):
             raise ValueError('Non-manifold edges must be repaired before automatic unwrap.')
@@ -1213,7 +1214,8 @@ def unwrap_from_edges(max_deviation=15.0, straighten_quads=False,
         cuts = {edge for edge in chosen | hard | seams if mesh.edge_faces[edge] == 2}
         if not cuts and not any(count == 1 for count in mesh.edge_faces.values()):
             raise ValueError('Closed mesh has no hard-edge seams. Select edges to cut.')
-        plans.append((mesh, cuts))
+        plans.append((path, om.MIntArray(sorted(cuts))))
+        del mesh
     if use_u3d:
         _ensure_unfold3d()
     oriented = 0
@@ -1223,7 +1225,8 @@ def unwrap_from_edges(max_deviation=15.0, straighten_quads=False,
     from uv_straight_native import uv_edit
     with uv_edit(), _undo(label):
         try:
-            for mesh, cuts in plans:
+            for path, cuts in plans:
+                mesh = Mesh(path, build_edges=False)
                 _save_marks(mesh, [])
                 if mesh.points:
                     cmds.polyPinUV(mesh.components(mesh.points), operation=1,
@@ -1231,7 +1234,7 @@ def unwrap_from_edges(max_deviation=15.0, straighten_quads=False,
                 _camera_project(mesh)
                 if cuts:
                     cmds.polyMapCut(['{}.e[{}]'.format(mesh.name, i)
-                                     for i in sorted(cuts)],
+                                     for i in cuts],
                                     constructionHistory=False)
                 fresh = Mesh(mesh.path)
                 if not fresh.points:
@@ -1287,11 +1290,12 @@ def unwrap_from_edges(max_deviation=15.0, straighten_quads=False,
                     cmds.polyMultiLayoutUV(mesh.name, layout=2, percentageSpace=.02,
                                            rotateForBestFit=0, prescale=0, scale=1,
                                            uvSetName=mesh.uv_set)
+                del mesh, fresh, all_shells, camera_reference, orientation_borders
             if use_u3d:
-                _pack_unwrapped([Mesh(mesh.path) for mesh, _ in plans], resolution, spacing_px)
+                _pack_unwrapped([Mesh(path, build_edges=False) for path, _ in plans], resolution, spacing_px)
             if straighten_quads:
-                for mesh, _ in plans:
-                    fresh = Mesh(mesh.path)
+                for path, _ in plans:
+                    fresh = Mesh(path)
                     pairs = _border_pairs(fresh, fresh.all_shells())
                     _apply_auto_plan(fresh, _auto_plan(fresh, pairs, max_deviation))
                 # Relax the rectangular cylinder sides after their H/V guides
@@ -1299,10 +1303,10 @@ def unwrap_from_edges(max_deviation=15.0, straighten_quads=False,
                 # the guides keep every row and column straight.  Caps and other
                 # irregular shells deliberately keep the preceding Maya unfold.
                 tasks = []
-                for mesh, _ in plans:
-                    fresh = Mesh(mesh.path)
+                for path, _ in plans:
+                    fresh = Mesh(path)
                     groups = _marks(fresh)
-                    for shell in rectangular_shells[mesh.path.fullPathName()]:
+                    for shell in rectangular_shells[path.fullPathName()]:
                         relevant = [g for g in groups if set(g['ids']) & shell]
                         pins = fresh.pins(shell)
                         tasks.append((fresh.path, set(shell), relevant, pins,

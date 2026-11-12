@@ -349,12 +349,13 @@ def _triangle_area(triangle):
 def prepare(meshes, resolution, spacing_px, margin_px=20, normalize_density=True,
             selected_only=False, rotate=False, method='fast', around_others=False,
             seconds=30., precision=1024, keep_stacks=False, gpu=False, target_size=(1.,1.), shape_proxies=False, spread_small=False, preserve_source=False,
-            target_origin=(0.,0.), iteration_limit=0,base_density=500., progress=None, cpu_assist=False):
+            target_origin=(0.,0.), iteration_limit=0,base_density=500., progress=None, cpu_assist=False, reuse_preparation=True):
     """Scene reads on the caller thread; the data dictionary is worker-safe.
 
     With selected_only and around_others, reserve visible unselected shells on
     the selected meshes. Unrelated scene meshes never occupy packing space.
     """
+    global _last_packed
     if not math.isfinite(base_density) or base_density<=0:raise ValueError('Base texel density must be positive.')
     target_size=area_size(target_size)
     if len(target_origin)!=2 or not all(math.isfinite(v) for v in target_origin):raise ValueError('Use a finite UV target origin.')
@@ -381,11 +382,13 @@ def prepare(meshes, resolution, spacing_px, margin_px=20, normalize_density=True
     import uv_straight_groups as uv_groups
     group_state=uv_groups.fingerprint()
     group_snapshot=uv_groups.snapshot(group_state)
+    # Large preparations contain topology, contours and several UV snapshots.
+    keep_replay = reuse_preparation and sum(len(mesh.points) + len(mesh.faces) for mesh in meshes) <= 50000
     reuse_key=((resolution,spacing_px,margin_px,normalize_density,selected_only,rotate,method,
                 around_others,precision,keep_stacks,gpu,target_size,shape_proxies,spread_small,
                 preserve_source,target_origin,base_density,bool(cpu_assist)),materials,group_state,
-               tuple((mesh.name,mesh.fn.uuid().asString(),mesh.uv_set,frozenset(mesh.selected)) for mesh in meshes))
-    if _last_packed is not None and _last_packed['reuse_key']==reuse_key:
+               tuple((mesh.name,mesh.fn.uuid().asString(),mesh.uv_set,frozenset(mesh.selected)) for mesh in meshes)) if keep_replay else None
+    if reuse_key is not None and _last_packed is not None and _last_packed['reuse_key']==reuse_key:
         try:validate(_last_packed)
         except ValueError:pass
         else:
@@ -393,6 +396,7 @@ def prepare(meshes, resolution, spacing_px, margin_px=20, normalize_density=True
             replay['data'].update(seconds=seconds,iteration_limit=iteration_limit)
             replay['preparation_cache_hit']=True
             return replay
+    _last_packed = None
     if progress: progress('Reading shell visibility...')
     face_masks=None
     allowed_owners=None
@@ -1037,7 +1041,9 @@ def apply(prepared, result, callback=None, _refine=True, source_callback=None):
         preserve(prepared,source_callback)
         if callback:callback(0,len(records))
     for entry in entries:
-        for key in ('before','after'):entry[key]=entry[key].T.tolist()
+        for key in ('before', 'after'):
+            entry[key] = tuple(om.MFloatArray(values.tolist()) for values in entry[key].T)
+        entry['ids'] = om.MIntArray(entry['ids'])
     commit(entries,callback)
     if result is not original:
         from uv_straight_pack_cache import remember_committed
@@ -1056,9 +1062,9 @@ def apply(prepared, result, callback=None, _refine=True, source_callback=None):
 def pack(meshes, resolution, spacing_px, margin_px=20, normalize_density=True,
          selected_only=False, rotate=False, method='fast', around_others=False,
          seconds=3600., precision=1024, callback=None, cancel=None, keep_stacks=False, gpu=False, target_size=(1.,1.), shape_proxies=False, spread_small=False, preserve_source=False,
-         target_origin=(0.,0.),iteration_limit=0,base_density=500.,cpu_assist=False):
+         target_origin=(0.,0.),iteration_limit=0,base_density=500.,cpu_assist=False,reuse_preparation=True):
     prepared = prepare(meshes,resolution,spacing_px,margin_px,normalize_density,
-                       selected_only,rotate,method,around_others,seconds,precision,keep_stacks,gpu,target_size,shape_proxies,spread_small,preserve_source,target_origin,iteration_limit,base_density,cpu_assist=cpu_assist)
+                       selected_only,rotate,method,around_others,seconds,precision,keep_stacks,gpu,target_size,shape_proxies,spread_small,preserve_source,target_origin,iteration_limit,base_density,cpu_assist=cpu_assist,reuse_preparation=reuse_preparation)
     result=plan(prepared['data'],callback,cancel)
     if preserve_source:
         from uv_straight import _undo
