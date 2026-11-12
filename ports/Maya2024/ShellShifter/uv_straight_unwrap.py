@@ -353,9 +353,9 @@ def _write(mesh, positions, commit):
     ids = [i for i in positions if tuple(mesh.points[i]) != tuple(positions[i])]
     if not ids:
         return
-    before = mesh.fn.getUVs(mesh.uv_set)
-    after = tuple(om.MFloatArray(values) for values in before)
+    before = [list(values) for values in mesh.fn.getUVs(mesh.uv_set)]
+    after = [list(values) for values in before]
     for i in ids:
         after[0][i], after[1][i] = positions[i]
     commit([dict(handle=om.MObjectHandle(mesh.fn.object()), uv_set=mesh.uv_set,
-                 before=before, after=after, ids=om.MIntArray(ids), shells=len(set(mesh.shell_ids)))])
+                 before=before, after=after, ids=ids, shells=len(mesh.all_shells()))])

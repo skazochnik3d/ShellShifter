@@ -1041,9 +1041,7 @@ def apply(prepared, result, callback=None, _refine=True, source_callback=None):
         preserve(prepared,source_callback)
         if callback:callback(0,len(records))
     for entry in entries:
-        for key in ('before', 'after'):
-            entry[key] = tuple(om.MFloatArray(values.tolist()) for values in entry[key].T)
-        entry['ids'] = om.MIntArray(entry['ids'])
+        for key in ('before','after'):entry[key]=entry[key].T.tolist()
     commit(entries,callback)
     if result is not original:
         from uv_straight_pack_cache import remember_committed
