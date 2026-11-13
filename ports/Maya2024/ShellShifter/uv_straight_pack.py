@@ -528,7 +528,11 @@ def prepare(meshes, resolution, spacing_px, margin_px=20, normalize_density=True
         # Material filters determine what moves, not what occupies the tile.
         obstacle_masks = {}
         known = set(mesh_keys)
-        for name in mesh_paths():
+        highlighted = cmds.ls(hilite=True, long=True) or []
+        # In component mode the highlighted meshes define the UV Editor scope.
+        candidates = (cmds.ls(highlighted, dag=True, type='mesh', long=True,
+                              noIntermediate=True) or []) if highlighted else mesh_paths()
+        for name in candidates:
             path = om.MSelectionList().add(name).getDagPath(0)
             handle = om.MObjectHandle(path.node()).hashCode()
             if handle in known or not path.isVisible():
@@ -540,12 +544,12 @@ def prepare(meshes, resolution, spacing_px, margin_px=20, normalize_density=True
             if any(not len(values) or max(values) <= start or min(values) >= start + size
                    for values, start, size in zip(fn.getUVs(uv_set), target_origin, target_size)):
                 continue
-            if not _visible_faces(path, False, group_snapshot=group_snapshot):
+            if not _visible_faces(path, face_group, group_snapshot=group_snapshot):
                 continue
             obstacle_meshes.append(Mesh(path, build_edges=False))
             known.add(handle)
         for mesh in obstacle_meshes:
-            faces = _visible_faces(mesh.path, False, group_snapshot=group_snapshot)
+            faces = _visible_faces(mesh.path, face_group, group_snapshot=group_snapshot)
             obstacle_masks[id(mesh)] = (faces, _face_uvs(mesh, faces))
     if selected_only and (around_others or to_other):
         for mesh in obstacle_meshes:
@@ -1012,7 +1016,7 @@ def validate(prepared):
     for name, faces in prepared.get('obstacle_visibility', {}).items():
         try:
             path = om.MSelectionList().add(name).getDagPath(0)
-            unchanged = _visible_faces(path, False, group_snapshot=group_snapshot) == faces
+            unchanged = _visible_faces(path, prepared['face_group_mode'], group_snapshot=group_snapshot) == faces
         except (RuntimeError, ValueError):
             unchanged = False
         if not unchanged:

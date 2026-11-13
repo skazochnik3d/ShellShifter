@@ -5,6 +5,11 @@ import maya.cmds as cmds
 import uv_straight_groups as model
 
 _display=globals().get('_display')
+KEEP_TEXEL_OPTION = 'shellShifterKeepTexelGroups'
+
+
+def keep_texel_enabled():
+    return bool(cmds.optionVar(query=KEEP_TEXEL_OPTION)) if cmds.optionVar(exists=KEEP_TEXEL_OPTION) else False
 
 
 class GroupDisplay(QtCore.QObject):
@@ -273,9 +278,9 @@ class GroupPanel(QtWidgets.QWidget):
             self.keep_texel = VisibleCheckBox('Keep Texel Groups')
             self.keep_texel.setObjectName('keepTexelGroups')
             self.keep_texel.setToolTip('Pack at the exact Texel Group densities. If the shells do not fit, UVs stay unchanged.')
-            option = 'shellShifterKeepTexelGroups'
-            self.keep_texel.setChecked(bool(cmds.optionVar(query=option)) if cmds.optionVar(exists=option) else False)
-            self.keep_texel.toggled.connect(lambda checked: cmds.optionVar(intValue=(option, int(checked))))
+            self.keep_texel.setChecked(keep_texel_enabled())
+            self.keep_texel.toggled.connect(
+                lambda checked: cmds.optionVar(intValue=(KEEP_TEXEL_OPTION, int(checked))))
             layout.addWidget(self.keep_texel)
         self.status=QtWidgets.QLabel();self.status.setWordWrap(True);self.status.hide();layout.addWidget(self.status)
         self.timer=QtCore.QTimer(self);self.timer.setInterval(600);self.timer.timeout.connect(self.refresh)
@@ -371,6 +376,8 @@ class GroupPanel(QtWidgets.QWidget):
         self.select_row(group_id);self.run(choose)
 
     def refresh(self,force=False):
+        if self.kind == 'texel':
+            self.keep_texel.setChecked(keep_texel_enabled())
         try:
             state=model.fingerprint()
             if not force and state==self.state:return

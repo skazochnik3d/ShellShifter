@@ -203,7 +203,7 @@ def build_packing_controls(window, layout, button):
                 preserve_source=source.isChecked() and transfer_mode.currentData()=='same',
                 base_density=window.texel_density_value.value() if hasattr(window,'texel_density_value') else 500.,
                 refresh_transfer=refresh_transfer if source.isChecked() else None,
-                keep_texel_groups=window.uv_group_panels['texel'].keep_texel.isChecked(),
+                keep_texel_groups=keep_texel_enabled(),
                 to_other=to_other)
         except Exception as error:
             if isValid(status):
@@ -263,7 +263,7 @@ def build_packing_controls(window, layout, button):
     controls['rectangle_button'] = button('To Rectangle', lambda:uv.square_to_rectangle(preserve_source=False), conversion)
     controls['rectangle_button'].setToolTip('Compress selected shells into the lower half: V ×0.5 about V=0; U is unchanged. Selecting any part includes the whole shell. One Undo restores the layout.')
     conversion.setStretch(0,1);conversion.setStretch(1,1)
-    from uv_straight_groups_ui import build as build_groups
+    from uv_straight_groups_ui import build as build_groups, keep_texel_enabled
     build_groups(window,layout)
     from uv_straight_transfer_direct_ui import DirectTransferControls
     window.texture_transfer=DirectTransferControls(window,layout,resolution,source,controls['spacing'],
