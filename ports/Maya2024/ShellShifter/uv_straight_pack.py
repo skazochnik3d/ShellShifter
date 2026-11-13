@@ -2,6 +2,7 @@
 from bisect import bisect_left, insort
 from collections import defaultdict
 import math
+import time
 from uv_straight_deps import np
 import maya.cmds as cmds
 import maya.api.OpenMaya as om
@@ -587,7 +588,7 @@ def prepare(meshes, resolution, spacing_px, margin_px=20, normalize_density=True
                 obstacles=obstacles,target_origin=target_origin,iteration_limit=iteration_limit,
                 static_triangles=static, static_area=static_area,
                 shape_proxies=bool(shape_proxies), spread_small=bool(spread_small), resolution=resolution,
-                preserve_scale=lock_density,
+                preserve_scale=lock_density, quick_insert=bool(selected_only and to_other),
                 normalize_density=bool(normalize_density))
     data['pack_groups']=[g for g in pack_memberships.values() if len(g['indices'])>1]
     density_meshes = {id(mesh) for (mesh, *_), group in zip(records, texel_assignments)
@@ -636,7 +637,16 @@ def plan(data, callback=None, cancel=None, finish_cancel=None):
     backend=None;saved_best=deepcopy(monitor.best)
     saved_pool=deepcopy(monitor.pool);saved_failures=deepcopy(monitor.failed_orders)
     try:
-        if data.get('static_triangles'):
+        if (data.get('quick_insert') and data.get('preserve_scale')
+                and data['method']=='contours' and monitor.best is None):
+            try:
+                seed = _contact_box_seed(data, monitor)
+            except SearchStopped:
+                seed = None
+            if seed is not None:
+                monitor.consider(1., *seed)
+                monitor.best['contact_seed'] = True
+        if data.get('static_triangles') and not data.get('quick_insert'):
             from uv_straight_pack_metrics import union_area
             monitor.update('Measuring occupied UV area',force=True)
             started=time.monotonic()
@@ -648,7 +658,7 @@ def plan(data, callback=None, cancel=None, finish_cancel=None):
         if data.get('shape_proxies'):
             from uv_straight_pack_shapes import classify
             monitor.shape_profiles=classify(data['boxes'],data['triangles'],monitor)
-        if data.get('gpu') and data['method'] == 'contours':
+        if data.get('gpu') and data['method'] == 'contours' and not (data.get('quick_insert') and data.get('preserve_scale') and monitor.best is not None):
             monitor.update('Connecting to GPU…',force=True)
             from uv_straight_pack_gpu import OpenCLPlacement
             steps=int(data.get('sequence_steps',1))
@@ -702,7 +712,7 @@ def plan(data, callback=None, cancel=None, finish_cancel=None):
             result['elapsed']=time.monotonic()-monitor.started
         _orient_square_layout(data,result)
         from uv_straight_pack_metrics import finish_area
-        finish_area(data,result,cancel)
+        finish_area(data,result,cancel,budget=.3 if data.get('quick_insert') else 2.5)
         result['static_union_area']=monitor.static_area
         result['engine']=monitor.engine or 'CPU'
         if cpu_error or (assistant is not None and assistant.error):
@@ -768,12 +778,13 @@ def _certify_box_seed(data, positions, turns):
     """Independently check conservative bounds after Maya's float32 UV write.
 
     A separated bounding box implies separated triangle unions, including holes
-    and intentional stacks inside a pack group. Only unobstructed seeds qualify.
+    and intentional stacks inside a pack group.
     """
-    if data['obstacles'] or data['static_triangles']:return False
     origin=np.asarray(data.get('target_origin',(0.,0.)),dtype=float)
     target=np.asarray(data.get('target_size',(1.,1.)),dtype=float)
     gap=float(data['gap']);margin=float(data['margin']);rects=[]
+    obstacles = [(np.asarray((x,y)), np.asarray((x+w,y+h)))
+                 for x,y,w,h in data['obstacles']]
     if set(positions)!=set(range(len(data['boxes']))):return False
     for i,(w,h) in enumerate(data['boxes']):
         if int(turns.get(i,0))%2:w,h=h,w
@@ -783,7 +794,7 @@ def _certify_box_seed(data, positions, turns):
         lo=(lo+origin).astype(np.float32).astype(float)-origin
         hi=(hi+origin).astype(np.float32).astype(float)-origin
         if not np.all(np.isfinite((lo,hi))) or np.any(lo<margin) or np.any(hi>target-margin):return False
-        for other_lo,other_hi in rects:
+        for other_lo,other_hi in obstacles + rects:
             separation=np.maximum(np.maximum(lo-other_hi,other_lo-hi),0.)
             if np.all(lo<other_hi) and np.all(other_lo<hi):return False
             if math.hypot(*separation)<gap:return False
@@ -794,7 +805,8 @@ def _certify_box_seed(data, positions, turns):
 def _contact_box_seed(data,monitor):
     """Bounded continuous seed; retain contour search if this cannot fit."""
     boxes=data['boxes']
-    if len(boxes)>256 or data['obstacles'] or data['static_triangles']:return None
+    fixed = data['obstacles']
+    if len(boxes)>256 or len(fixed)>256 or (data['static_triangles'] and not fixed):return None
     from uv_straight_contour_pack import _order
     target=tuple(data.get('target_size',(1.,1.)))
     origin=data.get('target_origin',(0.,0.))
@@ -804,10 +816,14 @@ def _contact_box_seed(data,monitor):
     gap=data['gap']+2.*guard;margin=data['margin']+guard
     extent=tuple(v-2.*margin+gap for v in target)
     if min(extent)<=0:return None
-    obstacles=[]
+    obstacles=[(x-margin,y-margin,w+gap,h+gap) for x,y,w,h in fixed]
+    seen = set()
     for ordering in range(4):
+        order = tuple(_order(boxes,ordering))
+        if order in seen:continue
+        seen.add(order)
         monitor.check()
-        result=_rectangles(boxes,_order(boxes,ordering),1.,extent,gap,data['rotate'],obstacles,monitor)
+        result=_rectangles(boxes,order,1.,extent,gap,data['rotate'],obstacles,monitor)
         if result is None:continue
         positions,turns=result
         positions={i:(x+margin,y+margin) for i,(x,y) in positions.items()}
@@ -826,19 +842,31 @@ def _fixed_layout(data,monitor,backend):
     method=data['method'];obstacles=data['obstacles'];grid=data['precision']
     extent=tuple(v-2*margin+gap for v in monitor.target_size)
     padded=[(x-margin,y-margin,w+gap,h+gap) for x,y,w,h in obstacles]
-    if method=='contours':
+    if method=='contours' and not data.get('quick_insert') and not obstacles:
         seed=_contact_box_seed(data,monitor)
         if seed is not None:
             monitor.consider(1.,*seed)
             monitor.best['contact_seed']=True
             return
     ordering=0;exact_attempted=False
+    seen_orders = set()
+    quick = data.get('quick_insert')
+    if quick and not monitor.seconds and not monitor.iteration_limit:
+        monitor.deadline = min(monitor.deadline, time.monotonic() + 5.)
     # Bound the number of candidates when both search limits are unlimited.
     while monitor.seconds or monitor.iteration_limit or ordering < 128:
         monitor.check()
+        if quick:
+            order = tuple(_order(boxes,ordering))
+            if order in seen_orders:
+                ordering += 1
+                if ordering >= 128 or len(boxes) == 1:
+                    return
+                continue
+            seen_orders.add(order)
         if method=='contours':
             monitor.precision=grid
-            if backend is not None and hasattr(backend,'place_many') and len(boxes)>=12:
+            if not quick and backend is not None and hasattr(backend,'place_many') and len(boxes)>=12:
                 orderings=tuple(range(ordering,ordering+4))
                 results=trial_many(boxes,data['triangles'],1.,grid,gap,margin,rotate,
                                    data['static_triangles'],monitor,orderings,backend)

@@ -25,7 +25,7 @@ def signature(data):
     options={name:data.get(name,default) for name,default in (
         ('gap',0.),('margin',0.),('rotate',False),('precision',1024),('method','contours'),('static_area',0.),
         ('gpu',False),('cpu_assist',False),('target_size',(1.,1.)),('target_origin',(0.,0.)),
-        ('preserve_scale',False),('shape_proxies',False),('resolution',2048),
+        ('preserve_scale',False),('quick_insert',False),('shape_proxies',False),('resolution',2048),
         ('profiling',False),('sequence_steps',1),('tail_size',0),('search_upgrade',True),
         ('batch_preparation',True),('hierarchy',True),('interval_order',1),('tabi_seed',True),('pack_groups',[]))}
     digest.update(json.dumps(options,sort_keys=True,separators=(',',':')).encode('ascii'))
