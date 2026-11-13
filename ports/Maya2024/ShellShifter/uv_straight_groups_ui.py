@@ -268,6 +268,16 @@ class GroupPanel(QtWidgets.QWidget):
         self.colors.setToolTip('Toggle shell colors by group. This is independent of shell visibility (the eye in each row).')
         self.colors.clicked.connect(lambda:self.run(lambda:display().show(kind)));row.addWidget(self.colors)
         display().changed.connect(self.color_state);self.colors.setChecked(display().kind==kind)
+        if kind == 'texel':
+            self.keep_texel = QtWidgets.QPushButton('Keep Texel Groups')
+            self.keep_texel.setCheckable(True)
+            self.keep_texel.setObjectName('keepTexelGroups')
+            self.keep_texel.setStyleSheet('QPushButton:checked { background: #4a6374; }')
+            self.keep_texel.setToolTip('Pack at the exact Texel Group densities. If the shells do not fit, UVs stay unchanged.')
+            option = 'shellShifterKeepTexelGroups'
+            self.keep_texel.setChecked(bool(cmds.optionVar(query=option)) if cmds.optionVar(exists=option) else False)
+            self.keep_texel.toggled.connect(lambda checked: cmds.optionVar(intValue=(option, int(checked))))
+            layout.addWidget(self.keep_texel)
         self.status=QtWidgets.QLabel();self.status.setWordWrap(True);self.status.hide();layout.addWidget(self.status)
         self.timer=QtCore.QTimer(self);self.timer.setInterval(600);self.timer.timeout.connect(self.refresh)
         self.refresh(force=True)

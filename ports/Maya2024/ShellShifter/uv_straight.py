@@ -13,7 +13,7 @@ import maya.api.OpenMaya as om
 
 WINDOW = 'uvStraightQtWindowWorkspaceControl'
 PRODUCT_NAME = 'ShellShifter'
-VERSION = '1.4.258'
+VERSION = '1.4.259'
 MARK_ATTR = 'uvStraightConstraints'
 _preview = None
 _window = None
@@ -1108,7 +1108,7 @@ def pack_selected_uvs(resolution=2048, spacing_px=16, margin_px=16,
                       normalize_density=True, rotate=True, method='compact',
                       around_others=True, seconds=30., precision=1024,
                       interactive=False, keep_stacks=False, gpu=False, target_size=(1.,1.), shape_proxies=False, spread_small=False, preserve_source=False,
-                      target_origin=(0.,0.),iteration_limit=0,base_density=500.,cpu_assist=False,refresh_transfer=None):
+                      target_origin=(0.,0.),iteration_limit=0,base_density=500.,cpu_assist=False,refresh_transfer=None,keep_texel_groups=False):
     """Pack existing complete selected shells without projection or unfolding."""
     from uv_straight_material_textures import end_preview
     from uv_straight_pack import pack, prepare, apply
@@ -1124,7 +1124,8 @@ def pack_selected_uvs(resolution=2048, spacing_px=16, margin_px=16,
                            normalize_density,True,rotate,method,around_others,
                            seconds,precision,keep_stacks,gpu,target_size,shape_proxies,
                            spread_small,preserve_source,target_origin,iteration_limit,base_density,
-                           progress=preparation_progress, cpu_assist=cpu_assist)
+                           progress=preparation_progress, cpu_assist=cpu_assist,
+                           keep_texel_groups=keep_texel_groups)
         def commit(prepared, result, callback, source_callback=None):
             from uv_straight_native import uv_edit
             with uv_edit(), _undo('ShellShifter Pack UVs'):
@@ -1142,7 +1143,8 @@ def pack_selected_uvs(resolution=2048, spacing_px=16, margin_px=16,
                         method=method, around_others=around_others,
                         seconds=seconds, precision=precision, keep_stacks=keep_stacks,gpu=gpu,target_size=target_size,
                         shape_proxies=shape_proxies,spread_small=spread_small,preserve_source=preserve_source,
-                        target_origin=target_origin,iteration_limit=iteration_limit,base_density=base_density,cpu_assist=cpu_assist)
+                        target_origin=target_origin,iteration_limit=iteration_limit,base_density=base_density,cpu_assist=cpu_assist,
+                        keep_texel_groups=keep_texel_groups)
         finally:
             cmds.select(selection, replace=True)
 

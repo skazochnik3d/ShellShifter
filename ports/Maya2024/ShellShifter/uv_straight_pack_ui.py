@@ -203,7 +203,8 @@ def build_packing_controls(window, layout, button):
                 spread_small=controls['spread_small'].isChecked(),
                 preserve_source=source.isChecked() and transfer_mode.currentData()=='same',
                 base_density=window.texel_density_value.value() if hasattr(window,'texel_density_value') else 500.,
-                refresh_transfer=refresh_transfer if source.isChecked() else None)
+                refresh_transfer=refresh_transfer if source.isChecked() else None,
+                keep_texel_groups=window.uv_group_panels['texel'].keep_texel.isChecked())
         except Exception as error:
             if isValid(status):
                 status.setText(str(error))

@@ -16,6 +16,8 @@ TOOLTIPS = {
     'Show Done': 'Показать готовые меши',
     'Texel': 'Тексель',
     'Texel Groups': 'Группы текселя',
+    'Keep Texel Groups': 'Сохранять тексель групп',
+    'Pack at the exact Texel Group densities. If the shells do not fit, UVs stay unchanged.': 'Пакует с заданным текселем групп. Если шеллы не помещаются, UV остаются без изменений.',
     'Shell Groups': 'Группы шеллов',
     'Texture Transfer': 'Настройки переноса текстур',
     'Transfer & Connect Textures': 'Перенести и подключить текстуры',

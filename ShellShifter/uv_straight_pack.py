@@ -349,7 +349,7 @@ def _triangle_area(triangle):
 def prepare(meshes, resolution, spacing_px, margin_px=20, normalize_density=True,
             selected_only=False, rotate=False, method='fast', around_others=False,
             seconds=30., precision=1024, keep_stacks=False, gpu=False, target_size=(1.,1.), shape_proxies=False, spread_small=False, preserve_source=False,
-            target_origin=(0.,0.), iteration_limit=0,base_density=500., progress=None, cpu_assist=False, reuse_preparation=True):
+            target_origin=(0.,0.), iteration_limit=0,base_density=500., progress=None, cpu_assist=False, reuse_preparation=True, keep_texel_groups=False):
     """Scene reads on the caller thread; the data dictionary is worker-safe.
 
     With selected_only and around_others, reserve visible unselected shells on
@@ -386,7 +386,7 @@ def prepare(meshes, resolution, spacing_px, margin_px=20, normalize_density=True
     keep_replay = reuse_preparation and sum(len(mesh.points) + len(mesh.faces) for mesh in meshes) <= 50000
     reuse_key=((resolution,spacing_px,margin_px,normalize_density,selected_only,rotate,method,
                 around_others,precision,keep_stacks,gpu,target_size,shape_proxies,spread_small,
-                preserve_source,target_origin,base_density,bool(cpu_assist)),materials,group_state,
+                preserve_source,target_origin,base_density,bool(cpu_assist),bool(keep_texel_groups)),materials,group_state,
                tuple((mesh.name,mesh.fn.uuid().asString(),mesh.uv_set,frozenset(mesh.selected)) for mesh in meshes)) if keep_replay else None
     if reuse_key is not None and _last_packed is not None and _last_packed['reuse_key']==reuse_key:
         try:validate(_last_packed)
@@ -485,6 +485,12 @@ def prepare(meshes, resolution, spacing_px, margin_px=20, normalize_density=True
             texel_assignments.append(resolved.get('texel',{}).get(owner))
             group=resolved.get('pack',{}).get(owner);shell_assignments.append(group)
             if group is not None and group.get('mode','relative')=='absolute':rigid[group['id']].append(i)
+        lock_density = bool(keep_texel_groups and any(texel_assignments))
+        if lock_density and normalize_density:
+            # Convert the base-density reference to UV units at this resolution.
+            factor = base_density / resolution
+            records = [(mesh, ids, minimum, scale * factor, bounds)
+                       for mesh, ids, minimum, scale, bounds in records]
         for indices in list(stacks.values())+list(rigid.values()):merge(indices)
         grouped=defaultdict(list)
         for i in range(len(records)):grouped[root(i)].append(i)
@@ -504,7 +510,7 @@ def prepare(meshes, resolution, spacing_px, margin_px=20, normalize_density=True
                      for i in indices]
             group_inputs.append((sources,[records[i][3] for i in indices],
                                  [texel_assignments[i]['id'] if texel_assignments[i] is not None else None for i in indices],
-                                 True))  # Texel targets are active in both Density modes.
+                                 True, lock_density))  # Texel targets are active in both Density modes.
         geometry=numerical.groups(group_inputs)
         for group_index,(indices,values) in enumerate(zip(members,geometry)):
             minimum,normalize,bounds,local,area=values
@@ -556,9 +562,8 @@ def prepare(meshes, resolution, spacing_px, margin_px=20, normalize_density=True
                 obstacles=obstacles,target_origin=target_origin,iteration_limit=iteration_limit,
                 static_triangles=static, static_area=static_area,
                 shape_proxies=bool(shape_proxies), spread_small=bool(spread_small), resolution=resolution,
-                # Density controls per-shell normalization, not global scale.
-                # The old packer uniformly scaled the full set in either mode.
-                preserve_scale=False,normalize_density=bool(normalize_density))
+                preserve_scale=lock_density,
+                normalize_density=bool(normalize_density))
     data['pack_groups']=[g for g in pack_memberships.values() if len(g['indices'])>1]
     density_meshes = {id(mesh) for (mesh, *_), group in zip(records, texel_assignments)
                       if normalize_density or group is not None}
@@ -790,7 +795,7 @@ def _fixed_layout(data,monitor,backend):
     width,height=(v-2*margin for v in monitor.target_size)
     if any(not ((w<=width+1e-12 and h<=height+1e-12) or
                 (rotate and h<=width+1e-12 and w<=height+1e-12)) for w,h in boxes):
-        raise ValueError('Density is off: a shell does not fit in the selected UV Area at the original scale. UVs were not changed.')
+        raise ValueError('Keep Texel Groups: a shell does not fit in the selected UV area at the requested density.')
     from uv_straight_contour_pack import _order,trial,trial_many
     method=data['method'];obstacles=data['obstacles'];grid=data['precision']
     extent=tuple(v-2*margin+gap for v in monitor.target_size)
@@ -802,7 +807,8 @@ def _fixed_layout(data,monitor,backend):
             monitor.best['contact_seed']=True
             return
     ordering=0;exact_attempted=False
-    while True:
+    # Bound the number of candidates when both search limits are unlimited.
+    while monitor.seconds or monitor.iteration_limit or ordering < 128:
         monitor.check()
         if method=='contours':
             monitor.precision=grid
@@ -910,7 +916,7 @@ def _plan(data, monitor, cancel, backend):
         if cancel is not None and cancel.is_set():
             return dict(cancelled=True,shells=0,elapsed=time.monotonic()-monitor.started,**monitor.statistics())
         if data.get('preserve_scale'):
-            raise ValueError('Density is off: no complete layout fits at the original scale. UVs were not changed. Increase Time/Iters, reduce Gap/Margin, or enable Density to allow scaling.')
+            raise ValueError('Keep Texel Groups: no complete layout found at the requested densities. UVs were not changed.')
         raise ValueError('No complete layout found. Increase search time or iteration limit, or reduce spacing.')
     result = dict(monitor.best)
     result.pop('order',None)
@@ -1060,9 +1066,9 @@ def apply(prepared, result, callback=None, _refine=True, source_callback=None):
 def pack(meshes, resolution, spacing_px, margin_px=20, normalize_density=True,
          selected_only=False, rotate=False, method='fast', around_others=False,
          seconds=3600., precision=1024, callback=None, cancel=None, keep_stacks=False, gpu=False, target_size=(1.,1.), shape_proxies=False, spread_small=False, preserve_source=False,
-         target_origin=(0.,0.),iteration_limit=0,base_density=500.,cpu_assist=False,reuse_preparation=True):
+         target_origin=(0.,0.),iteration_limit=0,base_density=500.,cpu_assist=False,reuse_preparation=True,keep_texel_groups=False):
     prepared = prepare(meshes,resolution,spacing_px,margin_px,normalize_density,
-                       selected_only,rotate,method,around_others,seconds,precision,keep_stacks,gpu,target_size,shape_proxies,spread_small,preserve_source,target_origin,iteration_limit,base_density,cpu_assist=cpu_assist,reuse_preparation=reuse_preparation)
+                       selected_only,rotate,method,around_others,seconds,precision,keep_stacks,gpu,target_size,shape_proxies,spread_small,preserve_source,target_origin,iteration_limit,base_density,cpu_assist=cpu_assist,reuse_preparation=reuse_preparation,keep_texel_groups=keep_texel_groups)
     result=plan(prepared['data'],callback,cancel)
     if preserve_source:
         from uv_straight import _undo

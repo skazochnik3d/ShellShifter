@@ -1,4 +1,4 @@
-ShellShifter 1.4.258 — установка для Maya 2027
+ShellShifter 1.4.259 — установка для Maya 2027
 ================================================
 
 Требования
@@ -24,7 +24,7 @@ Python, Qt и NumPy используются из комплекта Maya: от�
 и выполните следующий код, указав путь к своей распакованной папке:
 
     import runpy
-    folder = r'C:\path\to\ShellShifter_1.4.258'
+    folder = r'C:\path\to\ShellShifter_1.4.259'
     runpy.run_path(folder + '/install_shellshifter.py')['onMayaDroppedPythonFile']()
 
 Это тот же установщик: он создаёт кнопку Shelf и открывает панель.

@@ -16,7 +16,8 @@ class NumericWorkerError(RuntimeError):
 
 
 def group_geometry(item):
-    sources,norms,target_ids,normalize_density=item
+    sources,norms,target_ids,normalize_density,*options=item
+    strict = bool(options and options[0])
     def triangle_area(t):
         a,b,c=t
         return abs((b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0]))*.5
@@ -24,13 +25,18 @@ def group_geometry(item):
     requested=[(area,i) for i,area in enumerate(mapped) if normalize_density and target_ids[i] is not None]
     targets=defaultdict(list)
     for area,i in requested:targets[target_ids[i]].append((area,i))
-    if len(targets)>1:
+    if strict and requested:
+        scale = norms[requested[0][1]]
+        if any(not math.isclose(norms[i], scale, rel_tol=1e-7) for _, i in requested):
+            raise ValueError('Keep Texel Groups: a fixed Shell Group or UV stack has incompatible texel densities.')
+    if not strict and len(targets)>1:
         values=[math.sqrt(sum(area*norms[i]**2 for area,i in group)/sum(area for area,i in group))
                 for group in targets.values()]
         if not math.isclose(min(values),max(values),rel_tol=1e-4,abs_tol=1e-10):
             raise ValueError('A fixed Shell Group or UV stack has incompatible Texel Group targets. Match its relative densities first, or use R and separate the overlaps.')
     weights=requested or list(zip(mapped,range(len(sources))))
-    normalize=math.sqrt(sum(area*norms[i]**2 for area,i in weights)/sum(area for area,i in weights))
+    normalize = scale if strict and requested else math.sqrt(
+        sum(area * norms[i]**2 for area, i in weights) / sum(area for area, i in weights))
     points=[point for source in sources for tri in source for point in tri]
     minimum=tuple(min(point[axis] for point in points) for axis in (0,1))
     bounds=tuple((max(point[axis] for point in points)-minimum[axis])*normalize for axis in (0,1))
