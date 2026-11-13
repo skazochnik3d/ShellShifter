@@ -13,7 +13,7 @@ import maya.api.OpenMaya as om
 
 WINDOW = 'uvStraightQtWindowWorkspaceControl'
 PRODUCT_NAME = 'ShellShifter'
-VERSION = '1.4.257'
+VERSION = '1.4.258'
 MARK_ATTR = 'uvStraightConstraints'
 _preview = None
 _window = None
@@ -161,6 +161,8 @@ class Mesh:
         return {i for i, weight in zip(sorted(ids), weights) if weight > 0.0}
 
     def write(self, positions):
+        if not positions:
+            return
         components = self.components(positions)
         weights = cmds.polyPinUV(components, query=True, value=True) or []
         pinned = [(component, weight) for component, weight in zip(components, weights) if weight > 0]
@@ -737,10 +739,21 @@ def quick_straighten_quads(axis='H', max_deviation=15.0):
                 kept = [group for group in _marks(mesh)
                         if not set(group['ids']) & affected]
                 _save_marks(mesh, kept)
-                cmds.polyPinUV(mesh.components(affected), operation=1,
-                               uvSetName=mesh.uv_set)
-                for _, positions, _ in rectangles:
-                    mesh.write(positions)
+                pinned = mesh.pins(affected)
+                if pinned:
+                    cmds.polyPinUV(mesh.components(pinned), operation=1, uvSetName=mesh.uv_set)
+                positions = {}
+                for _, result, _ in rectangles:
+                    positions.update(result)
+                in_mesh = om.MFnDependencyNode(mesh.fn.object()).findPlug('inMesh', False)
+                if in_mesh.isDestination:
+                    if pinned:
+                        u, v = mesh.fn.getUVs(mesh.uv_set)
+                        mesh.points = dict(enumerate(zip(u, v)))
+                    mesh.write({i: point for i, point in positions.items() if mesh.points[i] != point})
+                else:
+                    from uv_straight_solver import write_batch
+                    write_batch([(mesh, positions)])
                 fresh = Mesh(mesh.path)
                 pairs = _border_pairs(fresh, [shell for shell, _, guides in rectangles
                                              if guides is None])

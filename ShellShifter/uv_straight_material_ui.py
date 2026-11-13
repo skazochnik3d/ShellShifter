@@ -1,4 +1,6 @@
 """Compact material picker, cooperative scene reads and quick UV selection."""
+from collections import OrderedDict
+from pathlib import Path
 import sys
 import time
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -11,7 +13,7 @@ from uv_straight_icons import icon
 _VIEW_OPTION = 'shellShifterMaterialsView'
 
 
-def _material_sphere(material):
+def _material_sphere(material, texture=None):
     color = QtGui.QColor('#8b9299')
     for attribute in ('baseColor', 'color', 'outColor'):
         plug = material + '.' + attribute
@@ -23,6 +25,10 @@ def _material_sphere(material):
             break
         except (RuntimeError, TypeError, ValueError, IndexError):
             continue
+    if texture is not None and not texture.isNull():
+        color = QtGui.QColor(255, 255, 255, 0)
+    elif color.value() < 40:
+        color = QtGui.QColor('#42474d')
     pixmap = QtGui.QPixmap(48, 48)
     pixmap.fill(QtCore.Qt.transparent)
     painter = QtGui.QPainter(pixmap)
@@ -32,6 +38,17 @@ def _material_sphere(material):
     gradient.setColorAt(.55, color)
     gradient.setColorAt(.92, color.darker(240))
     gradient.setColorAt(1., QtGui.QColor('#25282a'))
+    if texture is not None and not texture.isNull():
+        circle = QtGui.QPainterPath()
+        circle.addEllipse(2, 2, 44, 44)
+        painter.setClipPath(circle)
+        scaled = texture.scaled(44, 44, QtCore.Qt.KeepAspectRatioByExpanding,
+                                QtCore.Qt.SmoothTransformation)
+        painter.drawImage((48 - scaled.width()) // 2, (48 - scaled.height()) // 2, scaled)
+        gradient.setColorAt(0., QtGui.QColor(255, 255, 255, 64))
+        gradient.setColorAt(.55, QtGui.QColor(0, 0, 0, 0))
+        gradient.setColorAt(.92, QtGui.QColor(0, 0, 0, 120))
+        gradient.setColorAt(1., QtGui.QColor(0, 0, 0, 180))
     painter.setPen(QtCore.Qt.NoPen)
     painter.setBrush(gradient)
     painter.drawEllipse(2, 2, 44, 44)
@@ -208,6 +225,14 @@ class MaterialController(QtCore.QObject):
         self.resize_timer.timeout.connect(lambda:self.window.adjust_popup_size() if hasattr(self.window,'adjust_popup_size') else None)
         from uv_straight_material_texture_ui import TexturePanel
         self.textures=TexturePanel(self,body,outer)
+        self.sphere_revision = 0
+        self.sphere_jobs = {}
+        self.sphere_cache = OrderedDict()
+        self.sphere_pool = QtCore.QThreadPool(self)
+        self.sphere_pool.setMaxThreadCount(1)
+        from uv_straight_texture_reload import start
+        if not cmds.about(batch=True):
+            start().changed.connect(self.sphere_files_changed)
         # Catch external files on the material buttons and the empty panel too.
         self.view.setAcceptDrops(True)
         self.drop_viewport.setAcceptDrops(True)
@@ -281,6 +306,7 @@ class MaterialController(QtCore.QObject):
         self.remove_callbacks(self.callbacks)
         self.remove_callbacks(self.rename_callbacks)
         self.textures.pause()
+        self.cancel_sphere_previews()
 
     def stop(self, *unused):
         self.stopped = True
@@ -379,7 +405,21 @@ class MaterialController(QtCore.QObject):
         self.refresh_material_view()
         self.adjust_size()
 
-    def refresh_material_view(self):
+    def sphere_files_changed(self, paths):
+        from uv_straight_texture_reload import path_key
+        for key in tuple(self.sphere_cache):
+            if path_key(key[0]) in paths:
+                del self.sphere_cache[key]
+        if self.active and self.sphere_mode:
+            self.invalidate()
+
+    def cancel_sphere_previews(self):
+        self.sphere_revision += 1
+        self.sphere_pool.clear()
+        self.sphere_jobs.clear()
+
+    def refresh_material_view(self, *unused):
+        self.cancel_sphere_previews()
         self.list.setVisible(bool(self.records) and not self.sphere_mode)
         self.spheres.setVisible(bool(self.records) and self.sphere_mode)
         if not self.sphere_mode:
@@ -388,12 +428,60 @@ class MaterialController(QtCore.QObject):
                 (record.uuid, record.name) for record in self.records):
             self.spheres.clear()
             for record in self.records:
-                item = QtWidgets.QListWidgetItem(_material_sphere(record.name), record.name)
+                item = QtWidgets.QListWidgetItem(record.name)
                 item.setData(QtCore.Qt.UserRole, (record.uuid, record.name))
                 item.setToolTip(record.name)
                 self.spheres.addItem(item)
             self.spheres.fit_rows()
         self.sync_sphere_selection()
+        from uv_straight_material_texture_ui import ThumbnailTask
+        from uv_straight_material_textures import input_spec, parked_input, preview_path, upstream_file
+
+        for index, record in enumerate(self.records):
+            item = self.spheres.item(index)
+            item.setIcon(_material_sphere(record.name))
+            try:
+                plug, _, _ = input_spec(record.name, 'base_color')
+                file, candidates = upstream_file(plug)
+                if not candidates:
+                    file, _ = upstream_file(parked_input(plug, 'base_color'))
+                path = preview_path(cmds.getAttr(file + '.fileTextureName')) if file else ''
+                if not path:
+                    continue
+                stat = Path(path).stat()
+            except (RuntimeError, ValueError, OSError):
+                continue
+            key = (path, stat.st_mtime_ns, stat.st_size)
+            if key in self.sphere_cache:
+                item.setIcon(_material_sphere(record.name, self.sphere_cache[key]))
+                self.sphere_cache.move_to_end(key)
+                continue
+            if path in self.sphere_jobs:
+                self.sphere_jobs[path][1].append(index)
+                continue
+            task = ThumbnailTask(key, self.sphere_revision)
+            self.sphere_jobs[path] = (task, [index])
+            task.signals.ready.connect(self.sphere_preview_ready)
+            self.sphere_pool.start(task)
+
+    @QtCore.Slot(object, object, object)
+    def sphere_preview_ready(self, key, revision, image):
+        if revision != self.sphere_revision:
+            return
+        job = self.sphere_jobs.pop(key[0], None)
+        if job is None:
+            return
+        if image.isNull():
+            from uv_straight_material_texture_ui import maya_thumbnail
+            image = maya_thumbnail(key[0])
+        self.sphere_cache[key] = image
+        while len(self.sphere_cache) > 80:
+            self.sphere_cache.popitem(last=False)
+        if image.isNull():
+            return
+        for index in job[1]:
+            item = self.spheres.item(index)
+            item.setIcon(_material_sphere(self.records[index].name, image))
 
     def sync_sphere_selection(self):
         if self.sphere_mode:
