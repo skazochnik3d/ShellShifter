@@ -182,7 +182,7 @@ def build_packing_controls(window, layout, button):
     status.hide()
     controls['status'] = status
     def target_tile():return (int(saved('TileU',0)),int(saved('TileV',0)))
-    def perform():
+    def perform(to_other=False):
         from shiboken6 import isValid
         def refresh_transfer():
             if isValid(status):
@@ -203,7 +203,8 @@ def build_packing_controls(window, layout, button):
                 preserve_source=source.isChecked() and transfer_mode.currentData()=='same',
                 base_density=window.texel_density_value.value() if hasattr(window,'texel_density_value') else 500.,
                 refresh_transfer=refresh_transfer if source.isChecked() else None,
-                keep_texel_groups=window.uv_group_panels['texel'].keep_texel.isChecked())
+                keep_texel_groups=window.uv_group_panels['texel'].keep_texel.isChecked(),
+                to_other=to_other)
         except Exception as error:
             if isValid(status):
                 status.setText(str(error))
@@ -233,7 +234,7 @@ def build_packing_controls(window, layout, button):
         status.show()
         return result
     actions=QtWidgets.QHBoxLayout();actions.setSpacing(CONTROL_SPACING);layout.addLayout(actions)
-    controls['button'] = button('Pack UVs', perform, actions)
+    controls['button'] = button('Pack UVs', lambda: perform(), actions)
     controls['button'].setToolTip('Pack selected whole shells into the target tile, respecting visible fixed shells on selected meshes and UV Area. Unselected shells stay fixed. Selecting an object includes all its visible shells.\nRunning again with the same shells and settings continues from the best result. UV, geometry, visibility or material changes reset preparation.')
     def tile_text():
         u,v=target_tile()
@@ -250,6 +251,10 @@ def build_packing_controls(window, layout, button):
     controls['tile_button'].setText(tile_text())
     controls['tile_button'].setToolTip('Choose the packing target: point at a whole tile in the UV Editor and left-click. Esc or right-click cancels. Shell selection is preserved.')
     actions.setStretch(0,1);actions.setStretch(1,1)
+    other_actions = QtWidgets.QHBoxLayout()
+    layout.addLayout(other_actions)
+    controls['other_button'] = button('Pack to Other', lambda: perform(to_other=True), other_actions)
+    controls['other_button'].setToolTip('Pack selected shells around visible shells already in the target tile.')
     conversion = QtWidgets.QHBoxLayout()
     conversion.setSpacing(CONTROL_SPACING)
     layout.addLayout(conversion)
@@ -275,7 +280,7 @@ def build_packing_controls(window, layout, button):
     # Sharing persisted settings also keeps a dock and a popup in agreement.
     def refresh():
         for key, widget in controls.items():
-            if key in ('status', 'button', 'tile_button', 'square_button', 'rectangle_button'):
+            if key in ('status', 'button', 'tile_button', 'other_button', 'square_button', 'rectangle_button'):
                 continue
             blocker = QtCore.QSignalBlocker(widget)
             if key == 'area':

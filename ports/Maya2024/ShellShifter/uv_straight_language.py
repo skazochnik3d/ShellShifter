@@ -15,6 +15,8 @@ TOOLTIPS = {
     'Pins': 'Показать пины',
     'Show Done': 'Показать готовые меши',
     'Texel': 'Тексель',
+    'Pack to Other': 'Паковать к остальным',
+    'Pack selected shells around visible shells already in the target tile.': 'Пакует выбранные шеллы вокруг видимых шеллов в целевом тайле.',
     'Texel Groups': 'Группы текселя',
     'Keep Texel Groups': 'Сохранять тексель групп',
     'Pack at the exact Texel Group densities. If the shells do not fit, UVs stay unchanged.': 'Пакует с заданным текселем групп. Если шеллы не помещаются, UV остаются без изменений.',

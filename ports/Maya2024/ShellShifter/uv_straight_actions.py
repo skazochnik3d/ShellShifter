@@ -242,9 +242,6 @@ def register_button(window, title, callback):
     action = BUTTON_IDS.get(title)
     if action:
         window.shortcut_actions[action] = callback
-        if action == 'pack_uvs':
-            # Preserve existing shortcut/pie bindings after merging buttons.
-            window.shortcut_actions['pack_to_other'] = callback
 
 
 def tool_window():

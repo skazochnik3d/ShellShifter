@@ -349,7 +349,7 @@ def _triangle_area(triangle):
 def prepare(meshes, resolution, spacing_px, margin_px=20, normalize_density=True,
             selected_only=False, rotate=False, method='fast', around_others=False,
             seconds=30., precision=1024, keep_stacks=False, gpu=False, target_size=(1.,1.), shape_proxies=False, spread_small=False, preserve_source=False,
-            target_origin=(0.,0.), iteration_limit=0,base_density=500., progress=None, cpu_assist=False, reuse_preparation=True, keep_texel_groups=False):
+            target_origin=(0.,0.), iteration_limit=0,base_density=500., progress=None, cpu_assist=False, reuse_preparation=True, keep_texel_groups=False,to_other=False):
     """Scene reads on the caller thread; the data dictionary is worker-safe.
 
     With selected_only and around_others, reserve visible unselected shells on
@@ -377,13 +377,13 @@ def prepare(meshes, resolution, spacing_px, margin_px=20, normalize_density=True
     mesh_keys = [om.MObjectHandle(mesh.fn.object()).hashCode() for mesh in meshes]
     if len(set(mesh_keys)) != len(mesh_keys):
         raise ValueError('Select only one instance of each mesh; instances share the same UV coordinates.')
-    from uv_straight_materials import packing_materials, packing_mask
+    from uv_straight_materials import packing_materials, packing_mask, mesh_paths
     materials=packing_materials(meshes) if selected_only else None
     import uv_straight_groups as uv_groups
     group_state=uv_groups.fingerprint()
     group_snapshot=uv_groups.snapshot(group_state)
     # Large preparations contain topology, contours and several UV snapshots.
-    keep_replay = reuse_preparation and sum(len(mesh.points) + len(mesh.faces) for mesh in meshes) <= 50000
+    keep_replay = reuse_preparation and not to_other and sum(len(mesh.points) + len(mesh.faces) for mesh in meshes) <= 50000
     reuse_key=((resolution,spacing_px,margin_px,normalize_density,selected_only,rotate,method,
                 around_others,precision,keep_stacks,gpu,target_size,shape_proxies,spread_small,
                 preserve_source,target_origin,base_density,bool(cpu_assist),bool(keep_texel_groups)),materials,group_state,
@@ -454,7 +454,7 @@ def prepare(meshes, resolution, spacing_px, margin_px=20, normalize_density=True
             scoped_groups=numerical.overlap_groups([triangles_by_mesh[id(mesh)][owner] for mesh,owner in scope])
             overlap_labels={(id(scope[i][0]),scope[i][1]):label
                             for label,indices in enumerate(scoped_groups) for i in indices}
-        if keep_stacks and selected_only:
+        if keep_stacks and selected_only and not to_other:
             selected_owners={(id(mesh),mesh.shell_ids[ids[0]]) for mesh,ids,*_ in records}
             selected_labels={overlap_labels[owner] for owner in selected_owners}
             expanded={owner for owner,label in overlap_labels.items() if label in selected_labels}
@@ -520,13 +520,38 @@ def prepare(meshes, resolution, spacing_px, margin_px=20, normalize_density=True
                 adjusted[i]=(mesh,ids,minimum,normalize,bounds)
                 record_groups[i]=group_index
     static = []
-    obstacle_meshes=list(meshes)
-    if selected_only and around_others:
+    obstacle_meshes = list(meshes)
+    obstacle_masks = face_masks
+    if selected_only and to_other:
+        from uv_straight import Mesh
+        # Material filters determine what moves, not what occupies the tile.
+        obstacle_masks = {}
+        known = set(mesh_keys)
+        for name in mesh_paths():
+            path = om.MSelectionList().add(name).getDagPath(0)
+            handle = om.MObjectHandle(path.node()).hashCode()
+            if handle in known or not path.isVisible():
+                continue
+            fn = om.MFnMesh(path)
+            uv_set = fn.currentUVSetName()
+            if not uv_set:
+                continue
+            if any(not len(values) or max(values) <= start or min(values) >= start + size
+                   for values, start, size in zip(fn.getUVs(uv_set), target_origin, target_size)):
+                continue
+            if not _visible_faces(path, False, group_snapshot=group_snapshot):
+                continue
+            obstacle_meshes.append(Mesh(path, build_edges=False))
+            known.add(handle)
+        for mesh in obstacle_meshes:
+            faces = _visible_faces(mesh.path, False, group_snapshot=group_snapshot)
+            obstacle_masks[id(mesh)] = (faces, _face_uvs(mesh, faces))
+    if selected_only and (around_others or to_other):
         for mesh in obstacle_meshes:
             selected = packed.get(id(mesh),set())
-            sources=triangles_by_mesh.get(id(mesh)) if face_masks is None else None
+            sources=triangles_by_mesh.get(id(mesh)) if obstacle_masks is None else None
             if sources is None:
-                sources=_triangles_by_shell(mesh,None if face_masks is None else face_masks[id(mesh)][0])
+                sources=_triangles_by_shell(mesh,None if obstacle_masks is None else obstacle_masks[id(mesh)][0])
             for owner, group in sources.items():
                 if owner in selected:continue
                 if not all(math.isfinite(value) for tri in group for point in tri for value in point):
@@ -536,8 +561,8 @@ def prepare(meshes, resolution, spacing_px, margin_px=20, normalize_density=True
                 static.extend(tuple((x-target_origin[0],y-target_origin[1]) for x,y in tri) for tri in group)
     static=[tri for tri in static if all(max(p[a] for p in tri)>=0. and min(p[a] for p in tri)<=target_size[a] for a in (0,1))]
     obstacles=[]
-    if selected_only and around_others:
-        for x,y,w,h in _other_boxes(obstacle_meshes,packed,face_masks):
+    if selected_only and (around_others or to_other):
+        for x,y,w,h in _other_boxes(obstacle_meshes,packed,obstacle_masks):
             x-=target_origin[0];y-=target_origin[1]
             if x+w>=0 and y+h>=0 and x<=target_size[0] and y<=target_size[1]:obstacles.append((x,y,w,h))
     # Clip static triangles to the tile for the free-space estimate.
@@ -575,7 +600,8 @@ def prepare(meshes, resolution, spacing_px, margin_px=20, normalize_density=True
                           tuple(tuple(values) for values in mesh.fn.getVertices()),
                           tuple((p.x,p.y,p.z) for p in mesh.fn.getPoints(om.MSpace.kWorld))
                           if id(mesh) in density_meshes else None))
-    return dict(records=adjusted, data=data, record_groups=record_groups,preserve_source=bool(preserve_source),target_origin=target_origin,
+    return dict(obstacle_visibility={mesh.name: obstacle_masks[id(mesh)][0] for mesh in obstacle_meshes}
+                if selected_only and to_other else {}, records=adjusted, data=data, record_groups=record_groups,preserve_source=bool(preserve_source),target_origin=target_origin,
                 reuse_key=reuse_key,preparation_cache_hit=False,
                 preparation_workers=numerical.used_workers,preparation_cpu_error=numerical.error,
                 materials=materials,group_state=group_state,
@@ -955,6 +981,14 @@ def validate(prepared):
             except (RuntimeError,ValueError):unchanged=False
             if not unchanged:
                 raise ValueError('Mesh visibility changed during packing. Run packing again.')
+    for name, faces in prepared.get('obstacle_visibility', {}).items():
+        try:
+            path = om.MSelectionList().add(name).getDagPath(0)
+            unchanged = _visible_faces(path, False, group_snapshot=group_snapshot) == faces
+        except (RuntimeError, ValueError):
+            unchanged = False
+        if not unchanged:
+            raise ValueError('Fixed shell visibility changed during packing. Run packing again.')
     if prepared.get('material_faces') is not None:
         from uv_straight_materials import packing_mask
         cache={}
@@ -1066,9 +1100,9 @@ def apply(prepared, result, callback=None, _refine=True, source_callback=None):
 def pack(meshes, resolution, spacing_px, margin_px=20, normalize_density=True,
          selected_only=False, rotate=False, method='fast', around_others=False,
          seconds=3600., precision=1024, callback=None, cancel=None, keep_stacks=False, gpu=False, target_size=(1.,1.), shape_proxies=False, spread_small=False, preserve_source=False,
-         target_origin=(0.,0.),iteration_limit=0,base_density=500.,cpu_assist=False,reuse_preparation=True,keep_texel_groups=False):
+         target_origin=(0.,0.),iteration_limit=0,base_density=500.,cpu_assist=False,reuse_preparation=True,keep_texel_groups=False,to_other=False):
     prepared = prepare(meshes,resolution,spacing_px,margin_px,normalize_density,
-                       selected_only,rotate,method,around_others,seconds,precision,keep_stacks,gpu,target_size,shape_proxies,spread_small,preserve_source,target_origin,iteration_limit,base_density,cpu_assist=cpu_assist,reuse_preparation=reuse_preparation,keep_texel_groups=keep_texel_groups)
+                       selected_only,rotate,method,around_others,seconds,precision,keep_stacks,gpu,target_size,shape_proxies,spread_small,preserve_source,target_origin,iteration_limit,base_density,cpu_assist=cpu_assist,reuse_preparation=reuse_preparation,keep_texel_groups=keep_texel_groups,to_other=to_other)
     result=plan(prepared['data'],callback,cancel)
     if preserve_source:
         from uv_straight import _undo
