@@ -268,10 +268,9 @@ class GroupPanel(QtWidgets.QWidget):
         self.colors.clicked.connect(lambda:self.run(lambda:display().show(kind)));row.addWidget(self.colors)
         display().changed.connect(self.color_state);self.colors.setChecked(display().kind==kind)
         if kind == 'texel':
-            self.keep_texel = QtWidgets.QPushButton('Keep Texel Groups')
-            self.keep_texel.setCheckable(True)
+            from uv_straight_preview import VisibleCheckBox
+            self.keep_texel = VisibleCheckBox('Keep Texel Groups')
             self.keep_texel.setObjectName('keepTexelGroups')
-            self.keep_texel.setStyleSheet('QPushButton:checked { background: #4a6374; }')
             self.keep_texel.setToolTip('Pack at the exact Texel Group densities. If the shells do not fit, UVs stay unchanged.')
             option = 'shellShifterKeepTexelGroups'
             self.keep_texel.setChecked(bool(cmds.optionVar(query=option)) if cmds.optionVar(exists=option) else False)
