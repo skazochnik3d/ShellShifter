@@ -1037,7 +1037,7 @@ def _shutdown_shellshifter(*unused):
             updates._manager = None
 
         for widget in app.allWidgets():
-            if isValid(widget) and widget.objectName() in ('uvStraightQtWindow', POPUP_OBJECT):
+            if isValid(widget) and QtWidgets.QWidget.objectName(widget) in ('uvStraightQtWindow', POPUP_OBJECT):
                 widget.close()
                 widget.deleteLater()
         _popup = uv._window = None
@@ -1084,7 +1084,7 @@ def _build_window(popup):
     from functools import partial
     object_name = POPUP_OBJECT if popup else 'uvStraightQtWindow'
     for widget in QtWidgets.QApplication.allWidgets():
-        if widget.objectName() == object_name:
+        if QtWidgets.QWidget.objectName(widget) == object_name:
             if hasattr(widget, 'updates'):
                 widget.updates.stop()
             if hasattr(widget, 'texel_display'):
@@ -1114,7 +1114,7 @@ def _build_window(popup):
         cmds.deleteUI(DOCK_CONTROL)
     for widget in QtWidgets.QApplication.topLevelWidgets():
         try:
-            if widget.objectName() == object_name:
+            if QtWidgets.QWidget.objectName(widget) == object_name:
                 widget.close()
                 widget.deleteLater()
         except RuntimeError:
